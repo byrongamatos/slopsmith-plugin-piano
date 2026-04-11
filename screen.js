@@ -484,8 +484,8 @@ function detectRange(notes, chords) {
     return { lo, hi };
 }
 
-// Visible-window range — only notes currently on screen
-function detectVisibleRange(notes, chords, t) {
+// Scan the raw min/max MIDI from notes on screen (no snapping yet)
+function _visibleMidiRange(notes, chords, t) {
     let lo = 127, hi = 0;
     const tMax = t + VISIBLE_SECONDS;
 
@@ -510,39 +510,47 @@ function detectVisibleRange(notes, chords, t) {
             }
         }
     }
-    if (lo > hi) return null;
-    // Pad by a few semitones so notes don't sit at the very edge
-    lo = Math.max(0, lo - 2);
-    hi = Math.min(127, hi + 2);
-    // Snap to octave boundaries
+    return lo <= hi ? { lo, hi } : null;
+}
+
+// The currently displayed range (octave-snapped). Updated only in
+// discrete jumps so the keyboard never partially redraws.
+let _displayLo = null;
+let _displayHi = null;
+
+function _updateDisplayRange(notes, chords, t) {
+    const raw = _visibleMidiRange(notes, chords, t);
+    if (!raw) {
+        // No visible notes — keep current range
+        if (_displayLo !== null) return;
+        // First frame with no notes — use full song range
+        const full = detectRange(notes, chords);
+        _displayLo = full.lo;
+        _displayHi = full.hi;
+        return;
+    }
+
+    // If current range already contains all visible notes, keep it
+    if (_displayLo !== null && raw.lo >= _displayLo && raw.hi <= _displayHi) {
+        // Check if we can tighten: only shrink when the extra room is
+        // more than a full octave on either side
+        const loSlack = raw.lo - _displayLo;
+        const hiSlack = _displayHi - raw.hi;
+        if (loSlack < 12 && hiSlack < 12) return; // close enough, hold steady
+    }
+
+    // Compute new range: snap to octave boundaries with a small pad
+    let lo = Math.max(0, raw.lo - 2);
+    let hi = Math.min(127, raw.hi + 2);
     lo = Math.floor(lo / 12) * 12;
     hi = Math.ceil((hi + 1) / 12) * 12 - 1;
     // Minimum 2 octaves
     while (hi - lo < 23) {
         if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
     }
-    return { lo, hi };
-}
 
-// Smooth interpolation for animated range transitions
-let _displayLo = null;
-let _displayHi = null;
-
-function smoothRange(target, dt) {
-    if (_displayLo === null) {
-        _displayLo = target.lo;
-        _displayHi = target.hi;
-        return;
-    }
-    // Expand fast, contract slower (so upcoming notes don't get clipped)
-    const expandRate = Math.min(8.0 * dt, 1.0);
-    const contractRate = Math.min(2.0 * dt, 1.0);
-
-    const loRate = target.lo < _displayLo ? expandRate : contractRate;
-    const hiRate = target.hi > _displayHi ? expandRate : contractRate;
-
-    _displayLo += (target.lo - _displayLo) * loRate;
-    _displayHi += (target.hi - _displayHi) * hiRate;
+    _displayLo = lo;
+    _displayHi = hi;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -883,21 +891,11 @@ function _pianoDraw() {
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
     const ctx = _pianoCtx;
 
-    // Dynamic range: match the notes currently visible on screen
-    const visRange = detectVisibleRange(notes, chords, t);
-    if (!visRange) {
-        // No visible notes — keep current range or use full song fallback
-        if (_displayLo === null) {
-            const full = detectRange(notes, chords);
-            if (!full) return;
-            smoothRange(full, 1 / 60);
-        }
-    } else {
-        smoothRange(visRange, 1 / 60);
-    }
+    // Dynamic range: snap to octave-aligned range covering visible notes
+    _updateDisplayRange(notes, chords, t);
     if (_displayLo === null) return;
-    const lo = Math.floor(_displayLo);
-    const hi = Math.ceil(_displayHi);
+    const lo = _displayLo;
+    const hi = _displayHi;
 
     const kbH = H * KEYBOARD_H_FRAC;
     const kbTop = H - kbH;
