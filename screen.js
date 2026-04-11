@@ -805,6 +805,7 @@ function keyForMidi(midi, layout) {
 let _cachedRange = null;
 let _cachedLayout = null;
 let _lastLayoutW = 0;
+let _rangeNoteCount = 0;  // note count when range was computed
 
 function _pianoDraw() {
     _rafId = requestAnimationFrame(_pianoDraw);
@@ -820,7 +821,16 @@ function _pianoDraw() {
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
     const ctx = _pianoCtx;
 
-    if (!_cachedRange) _cachedRange = detectRange(notes, chords);
+    // Recompute range when new notes arrive (WebSocket sends in chunks)
+    const totalNotes = (notes ? notes.length : 0) + (chords ? chords.length : 0);
+    if (!_cachedRange || totalNotes > _rangeNoteCount) {
+        if (totalNotes > 0) {
+            _cachedRange = detectRange(notes, chords);
+            _rangeNoteCount = totalNotes;
+            _cachedLayout = null; // force layout rebuild
+        }
+    }
+    if (!_cachedRange) return; // no notes yet
     const { lo, hi } = _cachedRange;
 
     const kbH = H * KEYBOARD_H_FRAC;
@@ -1151,6 +1161,7 @@ function _pianoOnSongLoad() {
     _pianoInjectButton();
     _cachedRange = null;
     _cachedLayout = null;
+    _rangeNoteCount = 0;
     _resetScoring();
 
     setTimeout(() => {
@@ -1180,6 +1191,7 @@ const _origReconnect = highway.reconnect.bind(highway);
 highway.reconnect = function (filename, arrangement) {
     _cachedRange = null;
     _cachedLayout = null;
+    _rangeNoteCount = 0;
     _resetScoring();
     _origReconnect(filename, arrangement);
     setTimeout(() => {
