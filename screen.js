@@ -579,7 +579,7 @@ function _createSettingsPanel() {
 
     const panel = document.createElement('div');
     panel.id = 'piano-settings-panel';
-    panel.style.cssText = 'position:absolute;top:0;left:0;right:0;z-index:15;' +
+    panel.style.cssText = 'position:absolute;top:0;left:0;right:0;z-index:25;' +
         'background:rgba(8,8,20,0.94);border-bottom:1px solid #222;padding:6px 12px;' +
         'font-family:system-ui,sans-serif;display:none;';
 
@@ -697,7 +697,7 @@ function _removeSettingsPanel() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function _pianoShow() {
-    const hwCanvas = document.getElementById('highway-canvas');
+    const hwCanvas = document.getElementById('highway-canvas') || document.getElementById('highway');
     if (hwCanvas) hwCanvas.style.display = 'none';
 
     if (!_pianoCanvas) {
@@ -706,11 +706,14 @@ function _pianoShow() {
 
         _pianoCanvas = document.createElement('canvas');
         _pianoCanvas.id = 'piano-highway-canvas';
-        _pianoCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;';
+        _pianoCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;pointer-events:none;';
 
         const controls = document.getElementById('player-controls');
         if (controls) {
             player.insertBefore(_pianoCanvas, controls);
+            // Ensure controls sit above the piano canvas
+            controls.style.position = 'relative';
+            controls.style.zIndex = '20';
         } else {
             player.appendChild(_pianoCanvas);
         }
@@ -728,7 +731,7 @@ function _pianoShow() {
 }
 
 function _pianoHide() {
-    const hwCanvas = document.getElementById('highway-canvas');
+    const hwCanvas = document.getElementById('highway-canvas') || document.getElementById('highway');
     if (hwCanvas) hwCanvas.style.display = '';
 
     if (_pianoCanvas) {
