@@ -480,7 +480,7 @@ function detectRange(notes, chords) {
     if (lo > hi) { lo = 48; hi = 84; }
     lo = Math.max(0, Math.floor(lo / 12) * 12);
     hi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 - 1);
-    while (hi - lo < 23) { hi = Math.min(127, hi + 12); }
+    while (hi - lo < 47) { hi = Math.min(127, hi + 12); if (hi - lo < 47 && lo > 0) lo -= 12; }
     return { lo, hi };
 }
 
@@ -545,7 +545,7 @@ function _updateDisplayRange(notes, chords, t) {
     lo = Math.floor(lo / 12) * 12;
     hi = Math.ceil((hi + 1) / 12) * 12 - 1;
     // Minimum 2 octaves
-    while (hi - lo < 23) {
+    while (hi - lo < 47) {
         if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
     }
 
