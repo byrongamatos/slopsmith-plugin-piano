@@ -83,30 +83,49 @@ function _noteKey(time, midi) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Color Palette
+// Color Palette — Neon rainbow per chromatic note (Openthesia-style)
 // ═══════════════════════════════════════════════════════════════════════
 
-const OCTAVE_COLORS = [
-    '#ff4466', '#ff8844', '#ffcc33', '#66dd55', '#44ccaa',
-    '#44aaff', '#7766ff', '#cc55ff', '#ff55aa', '#aaaaaa',
+// [R, G, B] 0-1 per pitch class
+const NEON_RGB = [
+    [1.0, 0.2, 0.3],  // C  — Pink/Red
+    [1.0, 0.4, 0.4],  // C# — Light Red
+    [1.0, 0.9, 0.2],  // D  — Yellow
+    [1.0, 0.8, 0.4],  // D# — Light Yellow
+    [0.2, 0.8, 1.0],  // E  — Cyan/Blue
+    [1.0, 0.6, 0.1],  // F  — Orange
+    [1.0, 0.5, 0.3],  // F# — Light Orange
+    [0.3, 1.0, 0.3],  // G  — Green
+    [0.4, 1.0, 0.4],  // G# — Light Green
+    [0.6, 0.3, 1.0],  // A  — Purple
+    [0.7, 0.4, 1.0],  // A# — Light Purple
+    [1.0, 0.3, 1.0],  // B  — Magenta
 ];
-const OCTAVE_DIM = [
-    '#992233', '#994422', '#997711', '#338822', '#227755',
-    '#225588', '#443399', '#772299', '#992255', '#555555',
-];
+
+function _neonRGB(midi) { return NEON_RGB[midi % 12]; }
+
+function _rgbStr(r, g, b, a) {
+    return a !== undefined
+        ? `rgba(${(r * 255) | 0},${(g * 255) | 0},${(b * 255) | 0},${a})`
+        : `rgb(${(r * 255) | 0},${(g * 255) | 0},${(b * 255) | 0})`;
+}
+
+function neonColor(midi, alpha) {
+    const [r, g, b] = _neonRGB(midi);
+    return alpha !== undefined ? _rgbStr(r, g, b, alpha) : _rgbStr(r, g, b);
+}
+
+function neonColorDim(midi, factor, alpha) {
+    const [r, g, b] = _neonRGB(midi);
+    return _rgbStr(r * factor, g * factor, b * factor, alpha);
+}
 
 // Feedback colors
-const COL_SONG_ACTIVE  = '#22cc66';  // song note at now line
-const COL_PLAYER       = '#4488ff';  // player pressed, no match
-const COL_HIT          = '#00ff44';  // correct hit
-const COL_WRONG        = '#ff4444';  // wrong note flash
-const COL_MISSED       = '#555566';  // missed note
-
-function noteColor(midi, bright) {
-    const octave = Math.floor(midi / 12);
-    const palette = bright ? OCTAVE_COLORS : OCTAVE_DIM;
-    return palette[Math.min(octave, palette.length - 1)];
-}
+const COL_SONG_ACTIVE  = '#22cc66';
+const COL_PLAYER       = '#4488ff';
+const COL_HIT          = '#00ff44';
+const COL_WRONG        = '#ff4444';
+const COL_MISSED       = '#555566';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Configuration
@@ -914,32 +933,35 @@ function _pianoDraw() {
     _updateMissedNotes(t);
 
     // ── Background ──────────────────────────────────────────────────
-    ctx.fillStyle = '#060610';
+    ctx.fillStyle = '#040408';
     ctx.fillRect(0, 0, W, H);
 
-    // ── Note lane guides ────────────────────────────────────────────
+    // ── Vertical key-aligned grid lines ─────────────────────────────
     const noteAreaTop = 0;
     const nowLineY = kbTop * NOW_LINE_Y_FRAC;
 
-    ctx.globalAlpha = 0.08;
     for (const k of layout) {
         if (k.black) continue;
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(k.x, noteAreaTop, k.w, kbTop);
-        ctx.fillStyle = '#222244';
-        ctx.fillRect(k.x + k.w - 0.5, noteAreaTop, 1, kbTop);
+        // C columns are slightly brighter
+        const isC = k.midi % 12 === 0;
+        ctx.strokeStyle = isC ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)';
+        ctx.lineWidth = isC ? 1.5 : 0.5;
+        // Right edge of each white key
+        ctx.beginPath();
+        ctx.moveTo(k.x + k.w - 0.5, noteAreaTop);
+        ctx.lineTo(k.x + k.w - 0.5, kbTop);
+        ctx.stroke();
     }
-    ctx.globalAlpha = 1;
 
-    // ── Beat lines ──────────────────────────────────────────────────
+    // ── Beat / measure lines ────────────────────────────────────────
     const beats = highway.getBeats();
     if (beats) {
         for (const b of beats) {
             const dt = b.time - t;
             if (dt < -0.1 || dt > VISIBLE_SECONDS) continue;
             const y = _timeToY(dt, nowLineY, noteAreaTop);
-            ctx.strokeStyle = b.measure > 0 ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.06)';
-            ctx.lineWidth = b.measure > 0 ? 1 : 0.5;
+            ctx.strokeStyle = b.measure > 0 ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.04)';
+            ctx.lineWidth = b.measure > 0 ? 1.5 : 0.5;
             ctx.beginPath();
             ctx.moveTo(padL, y);
             ctx.lineTo(W - padR, y);
@@ -948,14 +970,12 @@ function _pianoDraw() {
     }
 
     // ── Now line ────────────────────────────────────────────────────
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(padL, nowLineY);
     ctx.lineTo(W - padR, nowLineY);
     ctx.stroke();
-    ctx.globalAlpha = 1;
 
     // ── Scrolling notes ─────────────────────────────────────────────
     _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY);
@@ -988,7 +1008,7 @@ function _timeToY(dt, nowLineY, topY) {
     return nowLineY - frac * (nowLineY - topY);
 }
 
-// ── Scrolling Notes ─────────────────────────────────────────────────
+// ── Scrolling Notes (Neon glow) ─────────────────────────────────────
 
 function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
     const allNotes = [];
@@ -1028,47 +1048,106 @@ function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
         if (noteH < 1) continue;
 
         const isActive = dt <= 0.05 && dtEnd >= -0.05;
+        const isOnBlack = key.black;
 
-        // Determine color based on hit state
-        let color;
+        // Note bar dimensions — black-key notes are slightly narrower
+        const inset = isOnBlack ? 1 : 2;
+        const barX = key.x + inset;
+        const barW = key.w - inset * 2;
+        const radius = Math.min(4, barW / 3, noteH / 2);
+
+        // Determine color
         const nk = _noteKey(n.t, n.midi);
-        if (_cfg.hitDetection && _hitNoteKeys.has(nk)) {
-            color = COL_HIT;
-        } else if (_cfg.hitDetection && _missedNoteKeys.has(nk)) {
-            color = COL_MISSED;
-        } else {
-            color = noteColor(n.midi, isActive);
+        let useHitColor = false, useMissColor = false;
+        if (_cfg.hitDetection) {
+            if (_hitNoteKeys.has(nk)) useHitColor = true;
+            else if (_missedNoteKeys.has(nk)) useMissColor = true;
         }
 
-        const barX = key.x + 1;
-        const barW = key.w - 2;
+        const [cr, cg, cb] = _neonRGB(n.midi);
+        // Black-key notes are slightly darker
+        const df = isOnBlack ? 0.7 : 1.0;
+        let r = cr * df, g = cg * df, b = cb * df;
 
-        if (isActive) {
-            ctx.shadowColor = color;
-            ctx.shadowBlur = 12;
+        if (useHitColor) { r = 0; g = 1; b = 0.27; }
+        else if (useMissColor) { r = 0.33; g = 0.33; b = 0.4; }
+
+        // ── Neon glow layers (3 concentric outlines) ────────────────
+        if (!useMissColor) {
+            const glowAlpha = isActive ? 0.5 : 0.25;
+            for (let i = 2; i >= 0; i--) {
+                const spread = (i + 1) * 2;
+                const a = glowAlpha * (0.15 + (2 - i) * 0.12);
+                ctx.strokeStyle = _rgbStr(r, g, b, a);
+                ctx.lineWidth = spread;
+                _roundRect(ctx, barX - 1, y1 - 1, barW + 2, noteH + 2, radius + 1);
+                ctx.stroke();
+            }
         }
 
-        ctx.fillStyle = color;
-        const radius = Math.min(3, barW / 4, noteH / 2);
+        // ── Solid note body ─────────────────────────────────────────
+        ctx.fillStyle = _rgbStr(r, g, b, useMissColor ? 0.4 : 1);
         _roundRect(ctx, barX, y1, barW, noteH, radius);
         ctx.fill();
-        ctx.shadowBlur = 0;
 
-        // Note label
+        // Brighter top highlight
+        if (!useMissColor && noteH > 4) {
+            const grad = ctx.createLinearGradient(0, y1, 0, y1 + Math.min(noteH, 12));
+            grad.addColorStop(0, _rgbStr(Math.min(r + 0.3, 1), Math.min(g + 0.3, 1), Math.min(b + 0.3, 1), 0.4));
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            _roundRect(ctx, barX, y1, barW, noteH, radius);
+            ctx.fill();
+        }
+
+        // ── Note label ──────────────────────────────────────────────
         if (_cfg.showNoteNames && noteH >= NOTE_LABEL_MIN_H && barW >= 14) {
-            ctx.fillStyle = '#000';
-            ctx.font = `bold ${Math.min(10, barW * 0.5)}px sans-serif`;
+            const fontSize = Math.min(10, barW * 0.45);
+            ctx.font = `bold ${fontSize}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
+            // Shadow for readability
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillText(midiToNoteName(n.midi), barX + barW / 2 + 0.5, y1 + noteH / 2 + 0.5);
+            ctx.fillStyle = '#fff';
             ctx.fillText(midiToNoteName(n.midi), barX + barW / 2, y1 + noteH / 2);
         }
     }
 }
 
-// ── Keyboard Drawing ────────────────────────────────────────────────
+// ── Keyboard Drawing (Openthesia-style) ─────────────────────────────
+
+// Compute approach proximity: how close the nearest upcoming note is
+// Returns 0 (far/none) to 1 (at the now line)
+function _approachAlpha(midi, notes, chords, t) {
+    const lookAhead = VISIBLE_SECONDS * 0.6;
+    let closest = Infinity;
+    if (notes) {
+        for (const n of notes) {
+            if (n.t < t - 0.05) continue;
+            if (n.t > t + lookAhead) break;
+            if (noteToMidi(n.s, n.f) === midi) {
+                closest = Math.min(closest, n.t - t);
+            }
+        }
+    }
+    if (chords) {
+        for (const c of chords) {
+            if (c.t < t - 0.05) continue;
+            if (c.t > t + lookAhead) break;
+            for (const cn of (c.notes || [])) {
+                if (noteToMidi(cn.s, cn.f) === midi) {
+                    closest = Math.min(closest, c.t - t);
+                }
+            }
+        }
+    }
+    if (closest === Infinity) return 0;
+    return Math.max(0, 1 - closest / lookAhead);
+}
 
 function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
-    // Build per-key state: song active, player pressed, hit/wrong
+    // Build per-key state
     const songActiveSet = new Set();
     const window_ = 0.06;
     if (notes) {
@@ -1076,9 +1155,8 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             if (n.t > t + window_) continue;
             const end = n.t + (n.sus || 0);
             if (end < t - window_) continue;
-            if (n.t <= t + window_ && end >= t - window_) {
+            if (n.t <= t + window_ && end >= t - window_)
                 songActiveSet.add(noteToMidi(n.s, n.f));
-            }
         }
     }
     if (chords) {
@@ -1087,93 +1165,168 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             if (c.t < t - 1) continue;
             for (const cn of (c.notes || [])) {
                 const end = c.t + (cn.sus || 0);
-                if (c.t <= t + window_ && end >= t - window_) {
+                if (c.t <= t + window_ && end >= t - window_)
                     songActiveSet.add(noteToMidi(cn.s, cn.f));
-                }
             }
         }
     }
 
-    // Wrong flash set
     const wrongSet = new Set();
     const now = performance.now();
     for (const wf of _wrongFlashes) {
         if (now - wf.wall < 400) wrongSet.add(wf.midi);
     }
 
-    // Background
-    ctx.fillStyle = '#0a0a18';
-    ctx.fillRect(0, kbTop, ctx.canvas.width / (window.devicePixelRatio || 1), kbH + 2);
+    // Background behind keyboard
+    ctx.fillStyle = '#060610';
+    ctx.fillRect(0, kbTop - 1, ctx.canvas.width / (window.devicePixelRatio || 1), kbH + 3);
 
-    const blackH = kbH * 0.6;
+    const blackH = kbH * 0.62;
+    const cornerR = 5;
 
-    // Draw white keys
+    // ── White keys ──────────────────────────────────────────────────
     for (const k of layout) {
         if (k.black) continue;
         const songActive = songActiveSet.has(k.midi);
         const playerHeld = _heldNotes.has(k.midi);
         const isWrong = wrongSet.has(k.midi);
+        const pressed = songActive || playerHeld;
+        const pressOffset = pressed ? 2 : 0;
+        const kw = k.w - 1;
 
-        let fill;
+        // Approach color lerp
+        const [nr, ng, nb] = _neonRGB(k.midi);
+        let fr = 0.91, fg = 0.91, fb = 0.94; // base white
         if (playerHeld && songActive) {
-            fill = COL_HIT;
+            fr = 0; fg = 1; fb = 0.27; // COL_HIT green
         } else if (isWrong && playerHeld) {
-            fill = COL_WRONG;
+            fr = 1; fg = 0.27; fb = 0.27;
         } else if (playerHeld) {
-            fill = COL_PLAYER;
+            fr = 0.27; fg = 0.53; fb = 1;
         } else if (songActive) {
-            fill = COL_SONG_ACTIVE;
+            fr = nr; fg = ng; fb = nb;
         } else {
-            fill = '#e8e8f0';
+            // Lerp toward note color based on approach proximity
+            const ap = _approachAlpha(k.midi, notes, chords, t);
+            if (ap > 0) {
+                fr += (nr - fr) * ap * 0.6;
+                fg += (ng - fg) * ap * 0.6;
+                fb += (nb - fb) * ap * 0.6;
+            }
         }
 
-        ctx.fillStyle = fill;
-        ctx.fillRect(k.x, kbTop, k.w - 1, kbH);
-        ctx.strokeStyle = '#888';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(k.x, kbTop, k.w - 1, kbH);
+        // 3D gradient body
+        const grad = ctx.createLinearGradient(0, kbTop + pressOffset, 0, kbTop + kbH);
+        grad.addColorStop(0, _rgbStr(Math.min(fr + 0.08, 1), Math.min(fg + 0.08, 1), Math.min(fb + 0.08, 1)));
+        grad.addColorStop(0.85, _rgbStr(fr, fg, fb));
+        grad.addColorStop(1, _rgbStr(fr * 0.75, fg * 0.75, fb * 0.75));
+        ctx.fillStyle = grad;
+        _roundRectBottom(ctx, k.x, kbTop + pressOffset, kw, kbH - pressOffset, cornerR);
+        ctx.fill();
 
-        // C labels
-        if (k.midi % 12 === 0) {
-            const octave = Math.floor(k.midi / 12) - 1;
-            ctx.fillStyle = (playerHeld || songActive) ? '#000' : '#888';
-            ctx.font = '9px sans-serif';
+        // Key border
+        ctx.strokeStyle = 'rgba(100,100,120,0.4)';
+        ctx.lineWidth = 0.5;
+        _roundRectBottom(ctx, k.x, kbTop + pressOffset, kw, kbH - pressOffset, cornerR);
+        ctx.stroke();
+
+        // Approach glow border
+        if (!pressed) {
+            const ap = _approachAlpha(k.midi, notes, chords, t);
+            if (ap > 0.15) {
+                const ba = Math.min((ap - 0.15) * 1.5, 1);
+                ctx.strokeStyle = _rgbStr(nr, ng, nb, ba * 0.6);
+                ctx.lineWidth = 2;
+                _roundRectBottom(ctx, k.x + 1, kbTop + 1, kw - 2, kbH - 2, cornerR);
+                ctx.stroke();
+            }
+        }
+
+        // Active glow
+        if (pressed) {
+            ctx.shadowColor = _rgbStr(fr, fg, fb);
+            ctx.shadowBlur = 12;
+            ctx.fillStyle = 'rgba(0,0,0,0)';
+            _roundRectBottom(ctx, k.x, kbTop + pressOffset, kw, kbH - pressOffset, cornerR);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        // Note name label
+        const pc = k.midi % 12;
+        const noteLetter = ['C','','D','','E','F','','G','','A','','B'][pc];
+        if (noteLetter) {
+            const isC = pc === 0;
+            const label = isC ? 'C' + (Math.floor(k.midi / 12) - 1) : noteLetter;
+            ctx.fillStyle = pressed ? 'rgba(0,0,0,0.7)' : 'rgba(80,80,100,0.5)';
+            ctx.font = `${isC ? 'bold ' : ''}${Math.min(10, kw * 0.45)}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'bottom';
-            ctx.fillText('C' + octave, k.x + k.w / 2, kbTop + kbH - 2);
+            ctx.fillText(label, k.x + kw / 2, kbTop + kbH - 3 + pressOffset);
         }
     }
 
-    // Draw black keys
+    // ── Black keys ──────────────────────────────────────────────────
     for (const k of layout) {
         if (!k.black) continue;
         const songActive = songActiveSet.has(k.midi);
         const playerHeld = _heldNotes.has(k.midi);
         const isWrong = wrongSet.has(k.midi);
+        const pressed = songActive || playerHeld;
+        const pressOffset = pressed ? 1 : 0;
 
-        let fill;
+        const [nr, ng, nb] = _neonRGB(k.midi);
+        let fr = 0.1, fg = 0.1, fb = 0.12; // base dark
         if (playerHeld && songActive) {
-            fill = COL_HIT;
+            fr = 0; fg = 0.8; fb = 0.2;
         } else if (isWrong && playerHeld) {
-            fill = COL_WRONG;
+            fr = 0.8; fg = 0.15; fb = 0.15;
         } else if (playerHeld) {
-            fill = COL_PLAYER;
+            fr = 0.2; fg = 0.4; fb = 0.8;
         } else if (songActive) {
-            fill = COL_SONG_ACTIVE;
+            fr = nr * 0.8; fg = ng * 0.8; fb = nb * 0.8;
         } else {
-            fill = '#1a1a2e';
+            const ap = _approachAlpha(k.midi, notes, chords, t);
+            if (ap > 0) {
+                fr += (nr * 0.7 - fr) * ap * 0.6;
+                fg += (ng * 0.7 - fg) * ap * 0.6;
+                fb += (nb * 0.7 - fb) * ap * 0.6;
+            }
         }
 
-        ctx.fillStyle = fill;
-        ctx.fillRect(k.x, kbTop, k.w, blackH);
-        ctx.strokeStyle = (playerHeld || songActive) ? '#ffffff44' : '#333';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(k.x, kbTop, k.w, blackH);
+        // Gradient body
+        const grad = ctx.createLinearGradient(0, kbTop + pressOffset, 0, kbTop + blackH);
+        grad.addColorStop(0, _rgbStr(Math.min(fr + 0.06, 1), Math.min(fg + 0.06, 1), Math.min(fb + 0.06, 1)));
+        grad.addColorStop(0.7, _rgbStr(fr, fg, fb));
+        grad.addColorStop(1, _rgbStr(fr * 0.6, fg * 0.6, fb * 0.6));
+        ctx.fillStyle = grad;
+        _roundRectBottom(ctx, k.x, kbTop + pressOffset, k.w, blackH - pressOffset, 3);
+        ctx.fill();
 
-        if (playerHeld || songActive) {
-            ctx.shadowColor = fill;
-            ctx.shadowBlur = 8;
-            ctx.fillRect(k.x, kbTop, k.w, blackH);
+        ctx.strokeStyle = 'rgba(50,50,60,0.5)';
+        ctx.lineWidth = 0.5;
+        _roundRectBottom(ctx, k.x, kbTop + pressOffset, k.w, blackH - pressOffset, 3);
+        ctx.stroke();
+
+        // Approach glow border
+        if (!pressed) {
+            const ap = _approachAlpha(k.midi, notes, chords, t);
+            if (ap > 0.15) {
+                const ba = Math.min((ap - 0.15) * 1.5, 1);
+                ctx.strokeStyle = _rgbStr(nr, ng, nb, ba * 0.5);
+                ctx.lineWidth = 1.5;
+                _roundRectBottom(ctx, k.x + 1, kbTop + 1, k.w - 2, blackH - 2, 3);
+                ctx.stroke();
+            }
+        }
+
+        // Active glow
+        if (pressed) {
+            ctx.shadowColor = _rgbStr(fr, fg, fb);
+            ctx.shadowBlur = 10;
+            ctx.fillStyle = 'rgba(0,0,0,0)';
+            _roundRectBottom(ctx, k.x, kbTop + pressOffset, k.w, blackH - pressOffset, 3);
+            ctx.fill();
             ctx.shadowBlur = 0;
         }
     }
@@ -1204,9 +1357,10 @@ function _drawAccuracyHUD(ctx, W) {
     ctx.fillText(text, W / 2, hudY + hudH / 2);
 }
 
-// ── Round Rect Helper ───────────────────────────────────────────────
+// ── Round Rect Helpers ──────────────────────────────────────────────
 
 function _roundRect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
     ctx.beginPath();
     ctx.moveTo(x + r, y);
     ctx.lineTo(x + w - r, y);
@@ -1217,6 +1371,19 @@ function _roundRect(ctx, x, y, w, h, r) {
     ctx.quadraticCurveTo(x, y + h, x, y + h - r);
     ctx.lineTo(x, y + r);
     ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+// Rounded bottom corners only (flat top for piano keys)
+function _roundRectBottom(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + w, y);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
     ctx.closePath();
 }
 
