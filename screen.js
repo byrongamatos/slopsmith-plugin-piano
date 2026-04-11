@@ -484,20 +484,16 @@ function detectRange(notes, chords) {
     return { lo, hi };
 }
 
-// Windowed range — notes visible on screen + look-ahead
-const RANGE_LOOK_BEHIND = 1.0;   // seconds behind current time
-const RANGE_LOOK_AHEAD  = 5.0;   // seconds ahead
-const RANGE_PAD_SEMITONES = 3;   // extra padding each side
-
-function detectWindowedRange(notes, chords, t) {
+// Visible-window range — only notes currently on screen
+function detectVisibleRange(notes, chords, t) {
     let lo = 127, hi = 0;
-    const tMin = t - RANGE_LOOK_BEHIND;
-    const tMax = t + RANGE_LOOK_AHEAD;
+    const tMax = t + VISIBLE_SECONDS;
 
     if (notes) {
         for (const n of notes) {
-            if (n.t + (n.sus || 0) < tMin) continue;
-            if (n.t > tMax) break; // notes are sorted by time
+            const end = n.t + (n.sus || 0);
+            if (end < t - 0.1) continue;
+            if (n.t > tMax) break;
             const m = noteToMidi(n.s, n.f);
             if (m < lo) lo = m;
             if (m > hi) hi = m;
@@ -505,7 +501,7 @@ function detectWindowedRange(notes, chords, t) {
     }
     if (chords) {
         for (const c of chords) {
-            if (c.t < tMin) continue;
+            if (c.t < t - 0.1) continue;
             if (c.t > tMax) break;
             for (const cn of (c.notes || [])) {
                 const m = noteToMidi(cn.s, cn.f);
@@ -514,9 +510,10 @@ function detectWindowedRange(notes, chords, t) {
             }
         }
     }
-    if (lo > hi) return null; // no notes in window
-    lo = Math.max(0, lo - RANGE_PAD_SEMITONES);
-    hi = Math.min(127, hi + RANGE_PAD_SEMITONES);
+    if (lo > hi) return null;
+    // Pad by a few semitones so notes don't sit at the very edge
+    lo = Math.max(0, lo - 2);
+    hi = Math.min(127, hi + 2);
     // Snap to octave boundaries
     lo = Math.floor(lo / 12) * 12;
     hi = Math.ceil((hi + 1) / 12) * 12 - 1;
@@ -530,21 +527,22 @@ function detectWindowedRange(notes, chords, t) {
 // Smooth interpolation for animated range transitions
 let _displayLo = null;
 let _displayHi = null;
-const RANGE_SMOOTH_RATE = 3.0; // speed of transition (higher = faster)
 
 function smoothRange(target, dt) {
     if (_displayLo === null) {
         _displayLo = target.lo;
         _displayHi = target.hi;
-        return { lo: target.lo, hi: target.hi };
+        return;
     }
-    const rate = Math.min(RANGE_SMOOTH_RATE * dt, 1.0);
-    _displayLo += (target.lo - _displayLo) * rate;
-    _displayHi += (target.hi - _displayHi) * rate;
-    // Snap to integers for key layout
-    const lo = Math.floor(_displayLo);
-    const hi = Math.ceil(_displayHi);
-    return { lo, hi };
+    // Expand fast, contract slower (so upcoming notes don't get clipped)
+    const expandRate = Math.min(8.0 * dt, 1.0);
+    const contractRate = Math.min(2.0 * dt, 1.0);
+
+    const loRate = target.lo < _displayLo ? expandRate : contractRate;
+    const hiRate = target.hi > _displayHi ? expandRate : contractRate;
+
+    _displayLo += (target.lo - _displayLo) * loRate;
+    _displayHi += (target.hi - _displayHi) * hiRate;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -885,16 +883,19 @@ function _pianoDraw() {
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
     const ctx = _pianoCtx;
 
-    // Dynamic range: scan notes near current time, smooth transitions
-    const windowRange = detectWindowedRange(notes, chords, t);
-    if (!windowRange) {
-        // No notes in window — use full song range as fallback
-        const full = detectRange(notes, chords);
-        if (!full) return;
-        smoothRange(full, 1 / 60);
+    // Dynamic range: match the notes currently visible on screen
+    const visRange = detectVisibleRange(notes, chords, t);
+    if (!visRange) {
+        // No visible notes — keep current range or use full song fallback
+        if (_displayLo === null) {
+            const full = detectRange(notes, chords);
+            if (!full) return;
+            smoothRange(full, 1 / 60);
+        }
     } else {
-        smoothRange(windowRange, 1 / 60);
+        smoothRange(visRange, 1 / 60);
     }
+    if (_displayLo === null) return;
     const lo = Math.floor(_displayLo);
     const hi = Math.ceil(_displayHi);
 
