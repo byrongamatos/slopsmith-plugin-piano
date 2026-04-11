@@ -458,6 +458,7 @@ function _resetScoring() {
 // Note Range Detection
 // ═══════════════════════════════════════════════════════════════════════
 
+// Full song range — used once all notes arrive
 function detectRange(notes, chords) {
     let lo = 127, hi = 0;
     if (notes) {
@@ -480,6 +481,69 @@ function detectRange(notes, chords) {
     lo = Math.max(0, Math.floor(lo / 12) * 12);
     hi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 - 1);
     while (hi - lo < 23) { hi = Math.min(127, hi + 12); }
+    return { lo, hi };
+}
+
+// Windowed range — notes visible on screen + look-ahead
+const RANGE_LOOK_BEHIND = 1.0;   // seconds behind current time
+const RANGE_LOOK_AHEAD  = 5.0;   // seconds ahead
+const RANGE_PAD_SEMITONES = 3;   // extra padding each side
+
+function detectWindowedRange(notes, chords, t) {
+    let lo = 127, hi = 0;
+    const tMin = t - RANGE_LOOK_BEHIND;
+    const tMax = t + RANGE_LOOK_AHEAD;
+
+    if (notes) {
+        for (const n of notes) {
+            if (n.t + (n.sus || 0) < tMin) continue;
+            if (n.t > tMax) break; // notes are sorted by time
+            const m = noteToMidi(n.s, n.f);
+            if (m < lo) lo = m;
+            if (m > hi) hi = m;
+        }
+    }
+    if (chords) {
+        for (const c of chords) {
+            if (c.t < tMin) continue;
+            if (c.t > tMax) break;
+            for (const cn of (c.notes || [])) {
+                const m = noteToMidi(cn.s, cn.f);
+                if (m < lo) lo = m;
+                if (m > hi) hi = m;
+            }
+        }
+    }
+    if (lo > hi) return null; // no notes in window
+    lo = Math.max(0, lo - RANGE_PAD_SEMITONES);
+    hi = Math.min(127, hi + RANGE_PAD_SEMITONES);
+    // Snap to octave boundaries
+    lo = Math.floor(lo / 12) * 12;
+    hi = Math.ceil((hi + 1) / 12) * 12 - 1;
+    // Minimum 2 octaves
+    while (hi - lo < 23) {
+        if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
+    }
+    return { lo, hi };
+}
+
+// Smooth interpolation for animated range transitions
+let _displayLo = null;
+let _displayHi = null;
+const RANGE_SMOOTH_RATE = 3.0; // speed of transition (higher = faster)
+
+function smoothRange(target, dt) {
+    if (_displayLo === null) {
+        _displayLo = target.lo;
+        _displayHi = target.hi;
+        return { lo: target.lo, hi: target.hi };
+    }
+    const rate = Math.min(RANGE_SMOOTH_RATE * dt, 1.0);
+    _displayLo += (target.lo - _displayLo) * rate;
+    _displayHi += (target.hi - _displayHi) * rate;
+    // Snap to integers for key layout
+    const lo = Math.floor(_displayLo);
+    const hi = Math.ceil(_displayHi);
     return { lo, hi };
 }
 
@@ -802,10 +866,10 @@ function keyForMidi(midi, layout) {
 // Drawing
 // ═══════════════════════════════════════════════════════════════════════
 
-let _cachedRange = null;
 let _cachedLayout = null;
 let _lastLayoutW = 0;
-let _rangeNoteCount = 0;  // note count when range was computed
+let _lastRangeLo = -1;
+let _lastRangeHi = -1;
 
 function _pianoDraw() {
     _rafId = requestAnimationFrame(_pianoDraw);
@@ -821,25 +885,29 @@ function _pianoDraw() {
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
     const ctx = _pianoCtx;
 
-    // Recompute range when new notes arrive (WebSocket sends in chunks)
-    const totalNotes = (notes ? notes.length : 0) + (chords ? chords.length : 0);
-    if (!_cachedRange || totalNotes > _rangeNoteCount) {
-        if (totalNotes > 0) {
-            _cachedRange = detectRange(notes, chords);
-            _rangeNoteCount = totalNotes;
-            _cachedLayout = null; // force layout rebuild
-        }
+    // Dynamic range: scan notes near current time, smooth transitions
+    const windowRange = detectWindowedRange(notes, chords, t);
+    if (!windowRange) {
+        // No notes in window — use full song range as fallback
+        const full = detectRange(notes, chords);
+        if (!full) return;
+        smoothRange(full, 1 / 60);
+    } else {
+        smoothRange(windowRange, 1 / 60);
     }
-    if (!_cachedRange) return; // no notes yet
-    const { lo, hi } = _cachedRange;
+    const lo = Math.floor(_displayLo);
+    const hi = Math.ceil(_displayHi);
 
     const kbH = H * KEYBOARD_H_FRAC;
     const kbTop = H - kbH;
     const padL = 10, padR = 10;
 
-    if (!_cachedLayout || _lastLayoutW !== W) {
+    // Rebuild layout when range or width changes
+    if (!_cachedLayout || _lastLayoutW !== W || lo !== _lastRangeLo || hi !== _lastRangeHi) {
         _cachedLayout = buildKeyLayout(lo, hi, padL, W - padL - padR);
         _lastLayoutW = W;
+        _lastRangeLo = lo;
+        _lastRangeHi = hi;
     }
     const layout = _cachedLayout;
 
@@ -1159,9 +1227,11 @@ function _roundRect(ctx, x, y, w, h, r) {
 
 function _pianoOnSongLoad() {
     _pianoInjectButton();
-    _cachedRange = null;
     _cachedLayout = null;
-    _rangeNoteCount = 0;
+    _displayLo = null;
+    _displayHi = null;
+    _lastRangeLo = -1;
+    _lastRangeHi = -1;
     _resetScoring();
 
     setTimeout(() => {
@@ -1189,9 +1259,11 @@ window.playSong = async function (filename, arrangement) {
 
 const _origReconnect = highway.reconnect.bind(highway);
 highway.reconnect = function (filename, arrangement) {
-    _cachedRange = null;
     _cachedLayout = null;
-    _rangeNoteCount = 0;
+    _displayLo = null;
+    _displayHi = null;
+    _lastRangeLo = -1;
+    _lastRangeHi = -1;
     _resetScoring();
     _origReconnect(filename, arrangement);
     setTimeout(() => {
