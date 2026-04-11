@@ -1,0 +1,7 @@
+{
+  "id": "piano",
+  "name": "Piano Highway",
+  "version": "2.0.0",
+  "private": false,
+  "script": "screen.js"
+}
