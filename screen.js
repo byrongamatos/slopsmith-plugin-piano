@@ -1,21 +1,34 @@
-// Piano Highway plugin — Synthesia-style scrolling piano renderer
-// with MIDI keyboard input, WebAudioFont synthesizer, and accuracy scoring.
-// Activates when a "Keys" or "Piano" arrangement is loaded, or via toggle button.
+// Piano Highway visualization plugin — Synthesia-style scrolling
+// piano renderer with MIDI keyboard input, WebAudioFont synthesizer,
+// and accuracy scoring.
+//
+// Wave B migration (slopsmith#36): the plugin used to wrap
+// window.playSong and toggle itself on/off based on arrangement name.
+// That activation model has been replaced by slopsmith core's viz
+// picker + Auto mode. This file now exports a setRenderer factory at
+// window.slopsmithViz_piano and declares matchesArrangement so Auto
+// mode picks piano automatically on Keys / Piano / Synth arrangements.
+//
+// Single-instance assumption: the plugin currently keeps overlay
+// canvas, scoring state, and the settings panel at module scope. The
+// main-player viz picker constructs at most one instance at a time,
+// so this is correct today. Splitscreen's per-panel setRenderer
+// adoption (Wave C) will re-factor these into createFactory closures
+// so multiple panes can host independent piano instances.
 
 (function () {
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════════
-// State
+// Config
 // ═══════════════════════════════════════════════════════════════════════
 
-let _pianoEnabled = false;
-let _pianoAuto = false;
-let _pianoCanvas = null;
-let _pianoCtx = null;
-let _rafId = null;
-let _settingsPanel = null;
-let _settingsVisible = false;
+const KEYS_PATTERNS = /keys|piano|keyboard|synth/i;
+const VISIBLE_SECONDS = 3.0;
+const NOW_LINE_Y_FRAC = 0.82;
+const KEYBOARD_H_FRAC = 0.15;
+const NOTE_LABEL_MIN_H = 16;
+const HIT_TOLERANCE = 0.10;        // seconds
 
 // ── Persisted settings ───────────────────────────────────────────────
 
@@ -35,34 +48,57 @@ function _saveCfg(key, val) {
     localStorage.setItem(storeKey, String(val));
 }
 
-// ── MIDI input state ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Module-level singleton state
+// ═══════════════════════════════════════════════════════════════════════
 
+// ── MIDI input ────────────────────────────────────────────────────────
 let _midiAccess = null;
 let _midiInput = null;
 const _heldNotes = new Map();      // transposed midi -> velocity
 let _sustainOn = false;
 const _sustainedNotes = new Set();  // midi notes pending release on pedal up
 
-// ── Synth state ──────────────────────────────────────────────────────
-
+// ── Synth ─────────────────────────────────────────────────────────────
 let _audioCtx = null;
 let _synthPlayer = null;
 let _synthPreset = null;
 let _synthGain = null;
-const _noteEnvelopes = new Map();   // transposed midi -> envelope from queueWaveTable
+const _noteEnvelopes = new Map();   // transposed midi -> envelope
 let _synthLoading = false;
 let _playerScriptLoaded = false;
 
-// ── Hit detection state ──────────────────────────────────────────────
+// ── Rendering / scoring (single active instance) ──────────────────────
+let _pianoCanvas = null;
+let _pianoCtx = null;
+let _settingsPanel = null;
+let _settingsGear = null;
+let _settingsVisible = false;
+let _highwayCanvas = null;          // the canvas handed to init(); must restore on destroy
+let _prevHighwayDisplay = '';
 
-const HIT_TOLERANCE = 0.10;        // seconds
+let _displayLo = null;
+let _displayHi = null;
+let _cachedLayout = null;
+let _lastLayoutW = 0;
+let _lastRangeLo = -1;
+let _lastRangeHi = -1;
+
 let _hits = 0, _misses = 0, _streak = 0, _bestStreak = 0;
-const _hitNoteKeys = new Set();     // "time|midi" strings for correctly hit notes
+const _hitNoteKeys = new Set();     // "time|midi" for correctly hit notes
 const _wrongFlashes = [];           // [{midi, wall}] for brief red flashes
-const _missedNoteKeys = new Set();  // "time|midi" strings for notes that passed unplayed
+const _missedNoteKeys = new Set();  // "time|midi" for notes that passed unplayed
+
+// Latest filtered arrays cached by draw(bundle) so async MIDI event
+// handlers (_checkHit, fired on key-down) can score against the same
+// difficulty-filtered chart the user is seeing. Bundle.notes/chords
+// are difficulty-aware; highway.getNotes()/.getChords() are not.
+let _latestNotes = null;
+let _latestChords = null;
+let _latestTime = 0;
 
 // ═══════════════════════════════════════════════════════════════════════
-// MIDI Helpers
+// MIDI / Color Helpers
 // ═══════════════════════════════════════════════════════════════════════
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -82,11 +118,8 @@ function _noteKey(time, midi) {
     return time.toFixed(3) + '|' + midi;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Color Palette — Neon rainbow per chromatic note (Openthesia-style)
-// ═══════════════════════════════════════════════════════════════════════
+// ── Neon rainbow per chromatic note (Openthesia-style) ────────────────
 
-// [R, G, B] 0-1 per pitch class
 const NEON_RGB = [
     [1.0, 0.2, 0.3],  // C  — Pink/Red
     [1.0, 0.4, 0.4],  // C# — Light Red
@@ -109,32 +142,6 @@ function _rgbStr(r, g, b, a) {
         ? `rgba(${(r * 255) | 0},${(g * 255) | 0},${(b * 255) | 0},${a})`
         : `rgb(${(r * 255) | 0},${(g * 255) | 0},${(b * 255) | 0})`;
 }
-
-function neonColor(midi, alpha) {
-    const [r, g, b] = _neonRGB(midi);
-    return alpha !== undefined ? _rgbStr(r, g, b, alpha) : _rgbStr(r, g, b);
-}
-
-function neonColorDim(midi, factor, alpha) {
-    const [r, g, b] = _neonRGB(midi);
-    return _rgbStr(r * factor, g * factor, b * factor, alpha);
-}
-
-// Feedback colors
-const COL_SONG_ACTIVE  = '#22cc66';
-const COL_PLAYER       = '#4488ff';
-const COL_HIT          = '#00ff44';
-const COL_WRONG        = '#ff4444';
-const COL_MISSED       = '#555566';
-
-// ═══════════════════════════════════════════════════════════════════════
-// Configuration
-// ═══════════════════════════════════════════════════════════════════════
-
-const VISIBLE_SECONDS = 3.0;
-const NOW_LINE_Y_FRAC = 0.82;
-const KEYBOARD_H_FRAC = 0.15;
-const NOTE_LABEL_MIN_H = 16;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Instruments (WebAudioFont — General MIDI via JCLive soundfont)
@@ -165,7 +172,7 @@ function _wafVar(gm)  { return '_tone_' + _wafFile(gm); }
 function _wafUrl(gm)  { return WAF_BASE + _wafFile(gm) + '.js'; }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Script Loader
+// Script loader
 // ═══════════════════════════════════════════════════════════════════════
 
 function _loadScript(url) {
@@ -180,7 +187,7 @@ function _loadScript(url) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// WebAudioFont Synthesizer
+// WebAudioFont synthesizer
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _synthInit() {
@@ -235,7 +242,6 @@ function _synthNoteOn(midi, velocity) {
     if (!_synthPlayer || !_synthPreset || !_audioCtx || !_synthGain) return;
     _synthEnsureCtx();
 
-    // Cancel any existing envelope for this note
     const existing = _noteEnvelopes.get(midi);
     if (existing) { try { existing.cancel(); } catch (_) {} }
 
@@ -254,13 +260,20 @@ function _synthNoteOff(midi) {
     }
 }
 
+function _synthReleaseAll() {
+    for (const env of _noteEnvelopes.values()) {
+        try { env.cancel(); } catch (_) {}
+    }
+    _noteEnvelopes.clear();
+}
+
 function _synthSetVolume(vol) {
     _saveCfg('synthVolume', vol);
     if (_synthGain) _synthGain.gain.value = vol;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Web MIDI Input
+// Web MIDI input
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _midiInit() {
@@ -281,14 +294,12 @@ function _midiAutoConnect() {
     _midiAccess.inputs.forEach(inp => inputs.push(inp));
     if (!inputs.length) return;
 
-    // Prefer saved device, fall back to first
     const saved = _cfg.midiInputId;
     const target = inputs.find(i => i.id === saved) || inputs[0];
     _midiConnect(target.id);
 }
 
 function _midiConnect(id) {
-    // Disconnect previous
     if (_midiInput) _midiInput.onmidimessage = null;
     _midiInput = null;
 
@@ -303,29 +314,40 @@ function _midiConnect(id) {
     _midiUpdateDeviceList();
 }
 
+function _midiPauseHandler() {
+    // Called from destroy() — detach the message handler so the
+    // connected device stops firing _onNoteOn / _onNoteOff into a
+    // plugin no longer visible. Keep the _midiInput reference so a
+    // future init() can reattach without the user having to re-pick
+    // their device in settings.
+    if (_midiInput) _midiInput.onmidimessage = null;
+}
+
+function _midiResumeHandler() {
+    // Called from init() — restore the handler if MIDI was already
+    // connected in a previous piano lifetime. If _midiInput is null
+    // this is a no-op; _midiInit + _midiAutoConnect will connect
+    // afresh from settings.
+    if (_midiInput) _midiInput.onmidimessage = _midiOnMessage;
+}
+
 function _midiOnMessage(e) {
     const [status, note, velocity] = e.data;
     const ch = status & 0x0F;
-
-    // Channel filter (-1 = all)
     if (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) return;
 
     const cmd = status & 0xF0;
     const transposed = note + _cfg.transpose;
 
     if (cmd === 0x90 && velocity > 0) {
-        // Note On
         _onNoteOn(transposed, velocity);
     } else if (cmd === 0x80 || (cmd === 0x90 && velocity === 0)) {
-        // Note Off
         _onNoteOff(transposed);
     } else if (cmd === 0xB0 && note === 64) {
-        // Sustain pedal (CC#64)
         if (velocity >= 64) {
             _sustainOn = true;
         } else {
             _sustainOn = false;
-            // Release all sustained notes
             for (const midi of _sustainedNotes) {
                 _heldNotes.delete(midi);
                 _synthNoteOff(midi);
@@ -339,14 +361,8 @@ function _onNoteOn(midi, velocity) {
     if (midi < 0 || midi > 127) return;
     _heldNotes.set(midi, velocity);
     _synthNoteOn(midi, velocity);
-
-    // Init audio context on first interaction
     _synthEnsureCtx();
-
-    // Hit detection
-    if (_cfg.hitDetection) {
-        _checkHit(midi);
-    }
+    if (_cfg.hitDetection) _checkHit(midi);
 }
 
 function _onNoteOff(midi) {
@@ -374,17 +390,21 @@ function _midiUpdateDeviceList() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Hit Detection / Accuracy Scoring
+// Hit detection / accuracy scoring
 // ═══════════════════════════════════════════════════════════════════════
+//
+// Score against the filtered chart the user is seeing — not the full
+// unfiltered arrays — so the difficulty slider applies to hit detection
+// too. draw() caches bundle.notes/chords/currentTime into _latest*
+// every frame; async MIDI events read those snapshots.
 
 function _checkHit(playedMidi) {
-    const t = highway.getTime();
-    const notes = highway.getNotes();
-    const chords = highway.getChords();
+    const t = _latestTime;
+    const notes = _latestNotes;
+    const chords = _latestChords;
 
     let foundHit = false;
 
-    // Check standalone notes
     if (notes) {
         for (const n of notes) {
             if (n.t > t + HIT_TOLERANCE + 0.5) break;
@@ -399,7 +419,6 @@ function _checkHit(playedMidi) {
         }
     }
 
-    // Check chord notes
     if (!foundHit && chords) {
         for (const c of chords) {
             if (c.t > t + HIT_TOLERANCE + 0.5) break;
@@ -428,10 +447,8 @@ function _checkHit(playedMidi) {
     }
 }
 
-function _updateMissedNotes(t) {
+function _updateMissedNotes(t, notes, chords) {
     if (!_cfg.hitDetection) return;
-    const notes = highway.getNotes();
-    const chords = highway.getChords();
     const cutoff = t - HIT_TOLERANCE - 0.05;
 
     if (notes) {
@@ -459,7 +476,6 @@ function _updateMissedNotes(t) {
         }
     }
 
-    // Prune old wrong flashes (>400ms)
     const now = performance.now();
     while (_wrongFlashes.length && now - _wrongFlashes[0].wall > 400) {
         _wrongFlashes.shift();
@@ -473,11 +489,32 @@ function _resetScoring() {
     _wrongFlashes.length = 0;
 }
 
+function _primeLatestSnapshot() {
+    // Fill _latest* from highway's public getters so a MIDI note-on
+    // that lands before the first draw() of a new chart still has a
+    // snapshot to score against. These getters return the unfiltered
+    // chart (difficulty slider applies to bundle.notes only), so the
+    // first frame of scoring uses the full chart; subsequent frames
+    // switch to filter-aware data. Worst case: one key-down immediately
+    // after song:ready might score against a note the difficulty slider
+    // has hidden — acceptable vs. guaranteeing the user a miss.
+    try {
+        if (typeof highway !== 'undefined') {
+            _latestNotes = typeof highway.getNotes === 'function' ? highway.getNotes() : null;
+            _latestChords = typeof highway.getChords === 'function' ? highway.getChords() : null;
+            _latestTime = typeof highway.getTime === 'function' ? highway.getTime() : 0;
+        }
+    } catch (_) {
+        _latestNotes = null;
+        _latestChords = null;
+        _latestTime = 0;
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
-// Note Range Detection
+// Note range detection
 // ═══════════════════════════════════════════════════════════════════════
 
-// Full song range — used once all notes arrive
 function detectRange(notes, chords) {
     let lo = 127, hi = 0;
     if (notes) {
@@ -503,7 +540,6 @@ function detectRange(notes, chords) {
     return { lo, hi };
 }
 
-// Scan the raw min/max MIDI from notes on screen (no snapping yet)
 function _visibleMidiRange(notes, chords, t) {
     let lo = 127, hi = 0;
     const tMax = t + VISIBLE_SECONDS;
@@ -532,38 +568,26 @@ function _visibleMidiRange(notes, chords, t) {
     return lo <= hi ? { lo, hi } : null;
 }
 
-// The currently displayed range (octave-snapped). Updated only in
-// discrete jumps so the keyboard never partially redraws.
-let _displayLo = null;
-let _displayHi = null;
-
 function _updateDisplayRange(notes, chords, t) {
     const raw = _visibleMidiRange(notes, chords, t);
     if (!raw) {
-        // No visible notes — keep current range
         if (_displayLo !== null) return;
-        // First frame with no notes — use full song range
         const full = detectRange(notes, chords);
         _displayLo = full.lo;
         _displayHi = full.hi;
         return;
     }
 
-    // If current range already contains all visible notes, keep it
     if (_displayLo !== null && raw.lo >= _displayLo && raw.hi <= _displayHi) {
-        // Check if we can tighten: only shrink when the extra room is
-        // more than a full octave on either side
         const loSlack = raw.lo - _displayLo;
         const hiSlack = _displayHi - raw.hi;
-        if (loSlack < 12 && hiSlack < 12) return; // close enough, hold steady
+        if (loSlack < 12 && hiSlack < 12) return;
     }
 
-    // Compute new range: snap to octave boundaries with a small pad
     let lo = Math.max(0, raw.lo - 2);
     let hi = Math.min(127, raw.hi + 2);
     lo = Math.floor(lo / 12) * 12;
     hi = Math.ceil((hi + 1) / 12) * 12 - 1;
-    // Minimum 2 octaves
     while (hi - lo < 47) {
         if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
     }
@@ -573,86 +597,34 @@ function _updateDisplayRange(notes, chords, t) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Auto-detection
+// Settings panel + gear button
 // ═══════════════════════════════════════════════════════════════════════
 
-const KEYS_PATTERNS = /keys|piano|keyboard|synth/i;
-
-function isKeysArrangement() {
-    const info = highway.getSongInfo();
-    if (!info) return false;
-    if (info.arrangement && KEYS_PATTERNS.test(info.arrangement)) return true;
-    if (info.arrangements) {
-        const idx = info.arrangement_index;
-        const arr = info.arrangements.find(a => a.index === idx);
-        if (arr && KEYS_PATTERNS.test(arr.name)) return true;
-    }
-    return false;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Toggle Buttons
-// ═══════════════════════════════════════════════════════════════════════
-
-function _pianoInjectButton() {
+function _injectSettingsGear() {
     const controls = document.getElementById('player-controls');
-    if (!controls || document.getElementById('btn-piano')) return;
+    if (!controls || _settingsGear) return;
 
     const closeBtn = controls.querySelector('button:last-child');
-
-    // Piano toggle
-    const btn = document.createElement('button');
-    btn.id = 'btn-piano';
-    btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-400 transition';
-    btn.textContent = 'Piano';
-    btn.title = 'Toggle piano highway view';
-    btn.onclick = () => _pianoToggle(false);
-    controls.insertBefore(btn, closeBtn);
-
-    // Settings gear
     const gear = document.createElement('button');
     gear.id = 'btn-piano-settings';
-    gear.className = 'px-2 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition hidden';
+    gear.className = 'px-2 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-400 transition';
     gear.innerHTML = '&#9881;';
     gear.title = 'Piano settings (MIDI, sound, scoring)';
     gear.onclick = _toggleSettings;
     controls.insertBefore(gear, closeBtn);
+    _settingsGear = gear;
 }
 
-function _pianoUpdateButton() {
-    const btn = document.getElementById('btn-piano');
-    const gear = document.getElementById('btn-piano-settings');
-    if (btn) {
-        if (_pianoEnabled) {
-            btn.className = 'px-3 py-1.5 bg-indigo-900/50 rounded-lg text-xs text-indigo-300 transition';
-            btn.textContent = 'Piano \u2713';
-        } else {
-            btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-400 transition';
-            btn.textContent = 'Piano';
-        }
-    }
-    if (gear) gear.classList.toggle('hidden', !_pianoEnabled);
-}
-
-function _pianoToggle(auto) {
-    if (auto && _pianoEnabled && !_pianoAuto) return;
-    _pianoEnabled = !_pianoEnabled || auto;
-    _pianoAuto = auto && _pianoEnabled;
-    _pianoUpdateButton();
-
-    if (_pianoEnabled) {
-        _pianoShow();
-    } else {
-        _pianoHide();
+function _removeSettingsGear() {
+    if (_settingsGear) {
+        _settingsGear.remove();
+        _settingsGear = null;
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Settings Panel
-// ═══════════════════════════════════════════════════════════════════════
 
 function _toggleSettings() {
     _settingsVisible = !_settingsVisible;
+    if (!_settingsPanel && _settingsVisible) _createSettingsPanel();
     if (_settingsPanel) _settingsPanel.style.display = _settingsVisible ? '' : 'none';
     if (_settingsVisible) {
         _midiInit();
@@ -728,7 +700,6 @@ function _createSettingsPanel() {
             </label>
         </div>`;
 
-    // Insert before canvas
     const controls = document.getElementById('player-controls');
     if (controls) {
         player.insertBefore(panel, controls);
@@ -737,7 +708,6 @@ function _createSettingsPanel() {
     }
     _settingsPanel = panel;
 
-    // Wire up events
     panel.querySelector('#piano-midi-select').onchange = function () {
         _midiConnect(this.value);
         _synthInit();
@@ -782,74 +752,7 @@ function _removeSettingsPanel() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Canvas Management
-// ═══════════════════════════════════════════════════════════════════════
-
-function _pianoShow() {
-    const hwCanvas = document.getElementById('highway-canvas') || document.getElementById('highway');
-    if (hwCanvas) hwCanvas.style.display = 'none';
-
-    if (!_pianoCanvas) {
-        const player = document.getElementById('player');
-        if (!player) return;
-
-        _pianoCanvas = document.createElement('canvas');
-        _pianoCanvas.id = 'piano-highway-canvas';
-        _pianoCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;pointer-events:none;';
-
-        const controls = document.getElementById('player-controls');
-        if (controls) {
-            player.insertBefore(_pianoCanvas, controls);
-            // Ensure controls sit above the piano canvas
-            controls.style.position = 'relative';
-            controls.style.zIndex = '20';
-        } else {
-            player.appendChild(_pianoCanvas);
-        }
-        _pianoCtx = _pianoCanvas.getContext('2d');
-    }
-
-    _createSettingsPanel();
-    _pianoResize();
-    window.addEventListener('resize', _pianoResize);
-    if (!_rafId) _rafId = requestAnimationFrame(_pianoDraw);
-
-    // Auto-init MIDI and synth in background
-    _midiInit();
-    _synthInit();
-}
-
-function _pianoHide() {
-    const hwCanvas = document.getElementById('highway-canvas') || document.getElementById('highway');
-    if (hwCanvas) hwCanvas.style.display = '';
-
-    if (_pianoCanvas) {
-        window.removeEventListener('resize', _pianoResize);
-        _pianoCanvas.remove();
-        _pianoCanvas = null;
-        _pianoCtx = null;
-    }
-    if (_rafId) {
-        cancelAnimationFrame(_rafId);
-        _rafId = null;
-    }
-    _removeSettingsPanel();
-}
-
-function _pianoResize() {
-    if (!_pianoCanvas) return;
-    const player = document.getElementById('player');
-    if (!player) return;
-    const dpr = window.devicePixelRatio || 1;
-    _pianoCanvas.width = player.clientWidth * dpr;
-    _pianoCanvas.height = player.clientHeight * dpr;
-    _pianoCanvas.style.width = player.clientWidth + 'px';
-    _pianoCanvas.style.height = player.clientHeight + 'px';
-    if (_pianoCtx) _pianoCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Keyboard Geometry
+// Keyboard geometry
 // ═══════════════════════════════════════════════════════════════════════
 
 function buildKeyLayout(lo, hi, areaX, areaW) {
@@ -891,26 +794,18 @@ function keyForMidi(midi, layout) {
 // Drawing
 // ═══════════════════════════════════════════════════════════════════════
 
-let _cachedLayout = null;
-let _lastLayoutW = 0;
-let _lastRangeLo = -1;
-let _lastRangeHi = -1;
-
-function _pianoDraw() {
-    _rafId = requestAnimationFrame(_pianoDraw);
+function _draw(notes, chords, t, beats) {
     if (!_pianoCanvas || !_pianoCtx) return;
-
-    const notes = highway.getNotes();
-    const chords = highway.getChords();
-    const t = highway.getTime();
-
     if (!notes && !chords) return;
+
+    _latestNotes = notes;
+    _latestChords = chords;
+    _latestTime = t;
 
     const W = _pianoCanvas.width / (window.devicePixelRatio || 1);
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
     const ctx = _pianoCtx;
 
-    // Dynamic range: snap to octave-aligned range covering visible notes
     _updateDisplayRange(notes, chords, t);
     if (_displayLo === null) return;
     const lo = _displayLo;
@@ -920,7 +815,6 @@ function _pianoDraw() {
     const kbTop = H - kbH;
     const padL = 10, padR = 10;
 
-    // Rebuild layout when range or width changes
     if (!_cachedLayout || _lastLayoutW !== W || lo !== _lastRangeLo || hi !== _lastRangeHi) {
         _cachedLayout = buildKeyLayout(lo, hi, padL, W - padL - padR);
         _lastLayoutW = W;
@@ -929,8 +823,7 @@ function _pianoDraw() {
     }
     const layout = _cachedLayout;
 
-    // Update missed notes tracking
-    _updateMissedNotes(t);
+    _updateMissedNotes(t, notes, chords);
 
     // ── Background ──────────────────────────────────────────────────
     ctx.fillStyle = '#040408';
@@ -942,11 +835,9 @@ function _pianoDraw() {
 
     for (const k of layout) {
         if (k.black) continue;
-        // C columns are slightly brighter
         const isC = k.midi % 12 === 0;
         ctx.strokeStyle = isC ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)';
         ctx.lineWidth = isC ? 1.5 : 0.5;
-        // Right edge of each white key
         ctx.beginPath();
         ctx.moveTo(k.x + k.w - 0.5, noteAreaTop);
         ctx.lineTo(k.x + k.w - 0.5, kbTop);
@@ -954,7 +845,6 @@ function _pianoDraw() {
     }
 
     // ── Beat / measure lines ────────────────────────────────────────
-    const beats = highway.getBeats();
     if (beats) {
         for (const b of beats) {
             const dt = b.time - t;
@@ -977,18 +867,13 @@ function _pianoDraw() {
     ctx.lineTo(W - padR, nowLineY);
     ctx.stroke();
 
-    // ── Scrolling notes ─────────────────────────────────────────────
     _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY);
-
-    // ── Keyboard ────────────────────────────────────────────────────
     _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t);
 
-    // ── Accuracy HUD ────────────────────────────────────────────────
     if (_cfg.hitDetection && (_hits + _misses) > 0) {
         _drawAccuracyHUD(ctx, W);
     }
 
-    // ── MIDI status indicator ───────────────────────────────────────
     if (_midiInput) {
         ctx.fillStyle = '#22cc66';
         ctx.beginPath();
@@ -1007,8 +892,6 @@ function _timeToY(dt, nowLineY, topY) {
     const frac = dt / VISIBLE_SECONDS;
     return nowLineY - frac * (nowLineY - topY);
 }
-
-// ── Scrolling Notes (Neon glow) ─────────────────────────────────────
 
 function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
     const allNotes = [];
@@ -1050,13 +933,11 @@ function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
         const isActive = dt <= 0.05 && dtEnd >= -0.05;
         const isOnBlack = key.black;
 
-        // Note bar dimensions — black-key notes are slightly narrower
         const inset = isOnBlack ? 1 : 2;
         const barX = key.x + inset;
         const barW = key.w - inset * 2;
         const radius = Math.min(4, barW / 3, noteH / 2);
 
-        // Determine color
         const nk = _noteKey(n.t, n.midi);
         let useHitColor = false, useMissColor = false;
         if (_cfg.hitDetection) {
@@ -1065,14 +946,12 @@ function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
         }
 
         const [cr, cg, cb] = _neonRGB(n.midi);
-        // Black-key notes are slightly darker
         const df = isOnBlack ? 0.7 : 1.0;
         let r = cr * df, g = cg * df, b = cb * df;
 
         if (useHitColor) { r = 0; g = 1; b = 0.27; }
         else if (useMissColor) { r = 0.33; g = 0.33; b = 0.4; }
 
-        // ── Neon glow layers (3 concentric outlines) ────────────────
         if (!useMissColor) {
             const glowAlpha = isActive ? 0.5 : 0.25;
             for (let i = 2; i >= 0; i--) {
@@ -1085,12 +964,10 @@ function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
             }
         }
 
-        // ── Solid note body ─────────────────────────────────────────
         ctx.fillStyle = _rgbStr(r, g, b, useMissColor ? 0.4 : 1);
         _roundRect(ctx, barX, y1, barW, noteH, radius);
         ctx.fill();
 
-        // Brighter top highlight
         if (!useMissColor && noteH > 4) {
             const grad = ctx.createLinearGradient(0, y1, 0, y1 + Math.min(noteH, 12));
             grad.addColorStop(0, _rgbStr(Math.min(r + 0.3, 1), Math.min(g + 0.3, 1), Math.min(b + 0.3, 1), 0.4));
@@ -1100,13 +977,11 @@ function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
             ctx.fill();
         }
 
-        // ── Note label ──────────────────────────────────────────────
         if (_cfg.showNoteNames && noteH >= NOTE_LABEL_MIN_H && barW >= 14) {
             const fontSize = Math.min(10, barW * 0.45);
             ctx.font = `bold ${fontSize}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            // Shadow for readability
             ctx.fillStyle = 'rgba(0,0,0,0.6)';
             ctx.fillText(midiToNoteName(n.midi), barX + barW / 2 + 0.5, y1 + noteH / 2 + 0.5);
             ctx.fillStyle = '#fff';
@@ -1115,10 +990,6 @@ function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
     }
 }
 
-// ── Keyboard Drawing (Openthesia-style) ─────────────────────────────
-
-// Compute approach proximity: how close the nearest upcoming note is
-// Returns 0 (far/none) to 1 (at the now line)
 function _approachAlpha(midi, notes, chords, t) {
     const lookAhead = VISIBLE_SECONDS * 0.6;
     let closest = Infinity;
@@ -1147,7 +1018,6 @@ function _approachAlpha(midi, notes, chords, t) {
 }
 
 function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
-    // Build per-key state
     const songActiveSet = new Set();
     const window_ = 0.06;
     if (notes) {
@@ -1177,14 +1047,12 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         if (now - wf.wall < 400) wrongSet.add(wf.midi);
     }
 
-    // Background behind keyboard
     ctx.fillStyle = '#060610';
     ctx.fillRect(0, kbTop - 1, ctx.canvas.width / (window.devicePixelRatio || 1), kbH + 3);
 
     const blackH = kbH * 0.62;
     const cornerR = 5;
 
-    // ── White keys ──────────────────────────────────────────────────
     for (const k of layout) {
         if (k.black) continue;
         const songActive = songActiveSet.has(k.midi);
@@ -1194,11 +1062,10 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         const pressOffset = pressed ? 2 : 0;
         const kw = k.w - 1;
 
-        // Approach color lerp
         const [nr, ng, nb] = _neonRGB(k.midi);
-        let fr = 0.91, fg = 0.91, fb = 0.94; // base white
+        let fr = 0.91, fg = 0.91, fb = 0.94;
         if (playerHeld && songActive) {
-            fr = 0; fg = 1; fb = 0.27; // COL_HIT green
+            fr = 0; fg = 1; fb = 0.27;
         } else if (isWrong && playerHeld) {
             fr = 1; fg = 0.27; fb = 0.27;
         } else if (playerHeld) {
@@ -1206,7 +1073,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         } else if (songActive) {
             fr = nr; fg = ng; fb = nb;
         } else {
-            // Lerp toward note color based on approach proximity
             const ap = _approachAlpha(k.midi, notes, chords, t);
             if (ap > 0) {
                 fr += (nr - fr) * ap * 0.6;
@@ -1215,7 +1081,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             }
         }
 
-        // 3D gradient body
         const grad = ctx.createLinearGradient(0, kbTop + pressOffset, 0, kbTop + kbH);
         grad.addColorStop(0, _rgbStr(Math.min(fr + 0.08, 1), Math.min(fg + 0.08, 1), Math.min(fb + 0.08, 1)));
         grad.addColorStop(0.85, _rgbStr(fr, fg, fb));
@@ -1224,13 +1089,11 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         _roundRectBottom(ctx, k.x, kbTop + pressOffset, kw, kbH - pressOffset, cornerR);
         ctx.fill();
 
-        // Key border
         ctx.strokeStyle = 'rgba(100,100,120,0.4)';
         ctx.lineWidth = 0.5;
         _roundRectBottom(ctx, k.x, kbTop + pressOffset, kw, kbH - pressOffset, cornerR);
         ctx.stroke();
 
-        // Approach glow border
         if (!pressed) {
             const ap = _approachAlpha(k.midi, notes, chords, t);
             if (ap > 0.15) {
@@ -1242,7 +1105,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             }
         }
 
-        // Active glow
         if (pressed) {
             ctx.shadowColor = _rgbStr(fr, fg, fb);
             ctx.shadowBlur = 12;
@@ -1252,7 +1114,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             ctx.shadowBlur = 0;
         }
 
-        // Note name label
         const pc = k.midi % 12;
         const noteLetter = ['C','','D','','E','F','','G','','A','','B'][pc];
         if (noteLetter) {
@@ -1266,7 +1127,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         }
     }
 
-    // ── Black keys ──────────────────────────────────────────────────
     for (const k of layout) {
         if (!k.black) continue;
         const songActive = songActiveSet.has(k.midi);
@@ -1276,7 +1136,7 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         const pressOffset = pressed ? 1 : 0;
 
         const [nr, ng, nb] = _neonRGB(k.midi);
-        let fr = 0.1, fg = 0.1, fb = 0.12; // base dark
+        let fr = 0.1, fg = 0.1, fb = 0.12;
         if (playerHeld && songActive) {
             fr = 0; fg = 0.8; fb = 0.2;
         } else if (isWrong && playerHeld) {
@@ -1294,7 +1154,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             }
         }
 
-        // Gradient body
         const grad = ctx.createLinearGradient(0, kbTop + pressOffset, 0, kbTop + blackH);
         grad.addColorStop(0, _rgbStr(Math.min(fr + 0.06, 1), Math.min(fg + 0.06, 1), Math.min(fb + 0.06, 1)));
         grad.addColorStop(0.7, _rgbStr(fr, fg, fb));
@@ -1308,7 +1167,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         _roundRectBottom(ctx, k.x, kbTop + pressOffset, k.w, blackH - pressOffset, 3);
         ctx.stroke();
 
-        // Approach glow border
         if (!pressed) {
             const ap = _approachAlpha(k.midi, notes, chords, t);
             if (ap > 0.15) {
@@ -1320,7 +1178,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
             }
         }
 
-        // Active glow
         if (pressed) {
             ctx.shadowColor = _rgbStr(fr, fg, fb);
             ctx.shadowBlur = 10;
@@ -1331,8 +1188,6 @@ function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         }
     }
 }
-
-// ── Accuracy HUD ────────────────────────────────────────────────────
 
 function _drawAccuracyHUD(ctx, W) {
     const total = _hits + _misses;
@@ -1357,8 +1212,6 @@ function _drawAccuracyHUD(ctx, W) {
     ctx.fillText(text, W / 2, hudY + hudH / 2);
 }
 
-// ── Round Rect Helpers ──────────────────────────────────────────────
-
 function _roundRect(ctx, x, y, w, h, r) {
     r = Math.min(r, w / 2, h / 2);
     ctx.beginPath();
@@ -1374,7 +1227,6 @@ function _roundRect(ctx, x, y, w, h, r) {
     ctx.closePath();
 }
 
-// Rounded bottom corners only (flat top for piano keys)
 function _roundRectBottom(ctx, x, y, w, h, r) {
     r = Math.min(r, w / 2, h / 2);
     ctx.beginPath();
@@ -1388,60 +1240,190 @@ function _roundRectBottom(ctx, x, y, w, h, r) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Hook into playSong
+// Lifecycle helpers
 // ═══════════════════════════════════════════════════════════════════════
 
-function _pianoOnSongLoad() {
-    _pianoInjectButton();
-    _cachedLayout = null;
-    _displayLo = null;
-    _displayHi = null;
-    _lastRangeLo = -1;
-    _lastRangeHi = -1;
-    _resetScoring();
+function _createOverlayCanvas() {
+    const player = document.getElementById('player');
+    if (!player) return null;
 
-    setTimeout(() => {
-        if (isKeysArrangement()) {
-            _pianoToggle(true);
-        } else if (_pianoAuto) {
-            _pianoEnabled = false;
-            _pianoAuto = false;
-            _pianoHide();
-            _pianoUpdateButton();
-        }
-    }, 500);
+    const canvas = document.createElement('canvas');
+    canvas.id = 'piano-highway-canvas';
+    canvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;pointer-events:none;';
+
+    const controls = document.getElementById('player-controls');
+    if (controls) {
+        player.insertBefore(canvas, controls);
+        // Keep controls above the overlay so the toggle gear stays clickable.
+        controls.style.position = 'relative';
+        controls.style.zIndex = '20';
+    } else {
+        player.appendChild(canvas);
+    }
+    return canvas;
 }
 
-const _origPlaySong = window.playSong;
-window.playSong = async function (filename, arrangement) {
-    if (_pianoAuto) {
-        _pianoEnabled = false;
-        _pianoAuto = false;
-        _pianoHide();
+function _applyCanvasDims(canvas) {
+    // Always re-measure #player in CSS pixels rather than use the w/h
+    // that highway.js passes to resize(). Those are backing-store dims
+    // scaled by `_renderScale` (HD/Medium/Low), tuned for the 2D or
+    // WebGL renderer that OWNS the given canvas. The piano runs on its
+    // OWN overlay canvas sized to the whole #player region minus the
+    // controls strip, so the sensible source of truth is the element
+    // rect — not the highway canvas's backing store.
+    if (!canvas) return;
+    const player = document.getElementById('player');
+    if (!player) return;
+    const w = player.clientWidth;
+    const h = player.clientHeight;
+    if (!w || !h) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    if (_pianoCtx) _pianoCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Factory — slopsmith#36 setRenderer contract
+// ═══════════════════════════════════════════════════════════════════════
+
+function createFactory() {
+    let _isReady = false;
+    // Per-instance listeners so destroy() can remove the exact
+    // function references (anonymous arrows aren't removable).
+    const _onWinResize = () => _applyCanvasDims(_pianoCanvas);
+    const _onSongReady = () => _resetForNewChart();
+
+    // Called from the song:ready listener wired below and from init()
+    // itself. Wipes scoring, cached layout, and the piano's display
+    // range so the next chart/arrangement doesn't inherit stale state.
+    // Critical for Auto-mode Keys-to-Keys transitions (piano renderer
+    // stays selected across the arrangement switch).
+    function _resetForNewChart() {
+        _resetScoring();
+        _cachedLayout = null;
+        _lastLayoutW = 0;
+        _lastRangeLo = -1;
+        _lastRangeHi = -1;
+        _displayLo = null;
+        _displayHi = null;
+        // Pull current arrays so a MIDI note-on arriving before the
+        // next draw() has something recent to score against.
+        _primeLatestSnapshot();
     }
-    await _origPlaySong(filename, arrangement);
-    _pianoOnSongLoad();
+
+    return {
+        init(canvas /* , bundle */) {
+            // Defensive teardown in case a prior init wasn't paired
+            // with destroy (shouldn't happen per the contract, but
+            // survive a misbehaving caller).
+            if (_pianoCanvas) {
+                _teardown(/* restoreCanvas */ false);
+            }
+
+            _highwayCanvas = canvas;
+            _prevHighwayDisplay = canvas ? canvas.style.display : '';
+
+            _pianoCanvas = _createOverlayCanvas();
+            if (!_pianoCanvas) {
+                // #player not in DOM — leave the 2D highway visible
+                // so the user isn't stuck on a blank viz. destroy()
+                // still no-op-cleans.
+                console.warn('[Piano] init: #player container missing; aborting');
+                return;
+            }
+            _pianoCtx = _pianoCanvas.getContext('2d');
+
+            // Only hide the 2D highway once our overlay is ready —
+            // if overlay creation had failed we'd want the default
+            // visible as a fallback.
+            if (_highwayCanvas) _highwayCanvas.style.display = 'none';
+
+            _injectSettingsGear();
+            _applyCanvasDims(_pianoCanvas);
+            window.addEventListener('resize', _onWinResize);
+            if (window.slopsmith) window.slopsmith.on('song:ready', _onSongReady);
+
+            _resetForNewChart();
+
+            // Kick off MIDI + synth in the background. These are
+            // one-time initialisations — a subsequent init() on a
+            // fresh factory instance will no-op because _midiAccess
+            // / _synthPlayer are already populated.
+            _midiInit();
+            _synthInit();
+            // Reattach the MIDI handler if a prior piano lifetime
+            // paused it on destroy. Safe no-op when no device is
+            // connected yet — _midiInit's autoconnect will wire
+            // things up once access resolves.
+            _midiResumeHandler();
+
+            _isReady = true;
+        },
+        draw(bundle) {
+            if (!_isReady || !bundle) return;
+            _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats);
+        },
+        resize(/* w, h */) {
+            // highway.js hands us canvas.width / canvas.height — the
+            // #highway backing store dimensions scaled by _renderScale.
+            // Those are tuned for the renderer that owns that canvas;
+            // our overlay canvas covers the whole #player region, so
+            // re-measure from the element rect instead of trusting the
+            // passed dims.
+            if (!_isReady) return;
+            _applyCanvasDims(_pianoCanvas);
+        },
+        destroy() {
+            _isReady = false;
+            window.removeEventListener('resize', _onWinResize);
+            if (window.slopsmith) window.slopsmith.off?.('song:ready', _onSongReady);
+            _midiPauseHandler();
+            _teardown(/* restoreCanvas */ true);
+        },
+    };
+
+    function _teardown(restoreCanvas) {
+        if (_pianoCanvas) {
+            _pianoCanvas.remove();
+            _pianoCanvas = null;
+            _pianoCtx = null;
+        }
+        _removeSettingsPanel();
+        _removeSettingsGear();
+
+        // Release any sounding notes so the user doesn't get a hung
+        // tone when switching viz mid-song.
+        _synthReleaseAll();
+        _heldNotes.clear();
+        _sustainedNotes.clear();
+        _sustainOn = false;
+
+        if (restoreCanvas && _highwayCanvas) {
+            _highwayCanvas.style.display = _prevHighwayDisplay;
+            _highwayCanvas = null;
+            _prevHighwayDisplay = '';
+        }
+
+        _latestNotes = null;
+        _latestChords = null;
+        _latestTime = 0;
+    }
+}
+
+createFactory.matchesArrangement = function (songInfo) {
+    if (!songInfo) return false;
+    if (songInfo.arrangement && KEYS_PATTERNS.test(songInfo.arrangement)) return true;
+    if (Array.isArray(songInfo.arrangements)) {
+        const idx = songInfo.arrangement_index;
+        const arr = songInfo.arrangements.find(a => a.index === idx);
+        if (arr && KEYS_PATTERNS.test(arr.name)) return true;
+    }
+    return false;
 };
 
-const _origReconnect = highway.reconnect.bind(highway);
-highway.reconnect = function (filename, arrangement) {
-    _cachedLayout = null;
-    _displayLo = null;
-    _displayHi = null;
-    _lastRangeLo = -1;
-    _lastRangeHi = -1;
-    _resetScoring();
-    _origReconnect(filename, arrangement);
-    setTimeout(() => {
-        if (isKeysArrangement()) {
-            if (!_pianoEnabled) _pianoToggle(true);
-        } else if (_pianoAuto) {
-            _pianoEnabled = false;
-            _pianoAuto = false;
-            _pianoHide();
-            _pianoUpdateButton();
-        }
-    }, 500);
-};
+window.slopsmithViz_piano = createFactory;
 
 })();
