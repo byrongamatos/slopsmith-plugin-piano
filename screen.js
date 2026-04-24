@@ -1543,6 +1543,13 @@ function createFactory() {
                 _pianoCanvas = null;
                 _highwayCanvas = null;
                 _prevHighwayDisplay = '';
+                // _createOverlayCanvas already forced position/zIndex
+                // on #player-controls and set _controlsStyleTouched —
+                // roll that back here or the override leaks into the
+                // fallback 2D renderer AND a later init() would
+                // snapshot the already-modified values, making the
+                // original styles unrecoverable.
+                _restoreControlsStyle();
                 return;
             }
 
