@@ -308,14 +308,20 @@ function _midiConnect(id) {
     if (_midiInput) _midiInput.onmidimessage = null;
     _midiInput = null;
 
-    // Release anything currently sounding + clear per-instance held
-    // state on the currently-active instance. _noteEnvelopes is
-    // shared; the active instance's _heldNotes / sustain maps are
-    // not accessible here directly, so we call a module-visible
-    // hook on the instance.
+    // Release anything currently sounding + clear per-instance
+    // held state on EVERY live instance, not just the focused one.
+    // _activeInstance can be null (no panel focused yet, or
+    // splitscreen-toggle race) or stale (focus swapped between
+    // device events). Iterating _instances guarantees no panel
+    // shows "stuck" held keys when it later becomes focused —
+    // _heldNotes / _sustainedNotes track per-instance visual
+    // state and need to be cleared in lockstep with the shared
+    // synth envelope cancel.
     _synthReleaseAll();
-    if (_activeInstance && _activeInstance._releaseAllHeld) {
-        _activeInstance._releaseAllHeld();
+    for (const inst of _instances) {
+        if (inst && typeof inst._releaseAllHeld === 'function') {
+            inst._releaseAllHeld();
+        }
     }
 
     _saveCfg('midiInputId', id || '');
@@ -1653,15 +1659,18 @@ function createFactory() {
             // already populated.
             _midiInit();
             _synthInit();
-            _midiResumeHandler();
 
             _isReady = true;
 
-            // Determine focus NOW rather than waiting for the first
-            // focus-change event — the main-player fast path and the
-            // "already-active panel gets its own piano" case both
-            // need to register as _activeInstance immediately.
+            // Determine focus BEFORE resuming the MIDI handler so
+            // _activeInstance is populated when onmidimessage gets
+            // wired. Otherwise a MIDI message arriving in the
+            // window between _midiResumeHandler and the first
+            // focus-change event would route through _midiOnMessage
+            // → null _activeInstance → silently dropped. Main-player
+            // fast path takes effect synchronously here too.
             _updateFocusState();
+            _midiResumeHandler();
         },
         draw(bundle) {
             if (!_isReady || !bundle) return;
