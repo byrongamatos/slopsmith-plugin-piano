@@ -1528,17 +1528,26 @@ function createFactory() {
         init(canvas /* , bundle */) {
             // Defensive teardown if a prior init wasn't paired with
             // destroy. Remove listeners, restore canvas, release
-            // held state — mirrors destroy() exactly.
+            // held state — mirrors destroy() exactly, INCLUDING
+            // removing from _instances and pausing MIDI if we're
+            // the last live instance. Without the _instances
+            // cleanup, a re-init that subsequently fails early
+            // (no mount / null ctx) would leave the instance
+            // orphaned in the set, making _instances.size checks
+            // inaccurate and preventing _midiPauseHandler from
+            // ever running.
             if (_pianoCanvas || _isReady) {
                 window.removeEventListener('resize', _onWinResize);
                 const ss = window.slopsmithSplitscreen;
                 if (ss && typeof ss.offFocusChange === 'function') {
                     ss.offFocusChange(_onFocusChange);
                 }
+                _instances.delete(instance);
+                if (_activeInstance === instance) _activeInstance = null;
                 _teardown();
                 _isReady = false;
                 _isFocused = false;
-                if (_activeInstance === instance) _activeInstance = null;
+                if (_instances.size === 0) _midiPauseHandler();
             }
 
             // Clear the destroyed sentinel so an init() following a
