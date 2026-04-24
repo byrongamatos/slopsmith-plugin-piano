@@ -1318,9 +1318,16 @@ function createFactory() {
         init(canvas /* , bundle */) {
             // Defensive teardown in case a prior init wasn't paired
             // with destroy (shouldn't happen per the contract, but
-            // survive a misbehaving caller).
-            if (_pianoCanvas) {
+            // survive a misbehaving caller). Mirror destroy()'s
+            // cleanup — just dropping _pianoCanvas without removing
+            // the window / slopsmith listeners or pausing MIDI would
+            // leak duplicate subscriptions on every re-init.
+            if (_pianoCanvas || _isReady) {
+                window.removeEventListener('resize', _onWinResize);
+                if (window.slopsmith) window.slopsmith.off?.('song:ready', _onSongReady);
+                _midiPauseHandler();
                 _teardown(/* restoreCanvas */ false);
+                _isReady = false;
             }
 
             _highwayCanvas = canvas;
@@ -1335,6 +1342,21 @@ function createFactory() {
                 return;
             }
             _pianoCtx = _pianoCanvas.getContext('2d');
+            if (!_pianoCtx) {
+                // 2D context unavailable (browser policy / OOM / a
+                // stale canvas that somehow lived through a previous
+                // WebGL acquire). Tear down our freshly-built overlay
+                // and leave the highway canvas visible as a fallback;
+                // without this guard we'd have hidden the highway
+                // below and every draw() would silently no-op against
+                // a null ctx, leaving a blank player.
+                console.warn('[Piano] init: getContext("2d") returned null; aborting');
+                _pianoCanvas.remove();
+                _pianoCanvas = null;
+                _highwayCanvas = null;
+                _prevHighwayDisplay = '';
+                return;
+            }
 
             // Only hide the 2D highway once our overlay is ready —
             // if overlay creation had failed we'd want the default
