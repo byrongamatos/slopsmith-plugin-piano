@@ -1632,7 +1632,15 @@ function createFactory() {
             window.addEventListener('resize', _onWinResize);
 
             const ss = window.slopsmithSplitscreen;
-            if (ss && typeof ss.onFocusChange === 'function') {
+            // Subscribe only when BOTH on/offFocusChange exist on
+            // the helper. A subscribe-without-unsubscribe path
+            // would leak the listener every init/destroy cycle and
+            // — combined with _ssActive's strict surface check
+            // returning false — also produce inconsistent focus
+            // routing where the listener fires but the wrappers
+            // treat splitscreen as inactive.
+            if (ss && typeof ss.onFocusChange === 'function'
+                   && typeof ss.offFocusChange === 'function') {
                 ss.onFocusChange(_onFocusChange);
             }
 
