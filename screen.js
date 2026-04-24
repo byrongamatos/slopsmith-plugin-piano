@@ -355,12 +355,18 @@ function _midiOnMessage(e) {
     if (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) return;
 
     const cmd = status & 0xF0;
-    const transposed = note + _cfg.transpose;
 
+    // Pass the RAW MIDI note number to instance handlers; the
+    // instance applies transpose internally and remembers the
+    // played value so a transpose change between note-on and
+    // note-off can't strand a held note. Computing transpose
+    // here would compute a different "transposed" for the same
+    // raw note across messages, leaving the synth + held state
+    // pointing at the wrong key.
     if (cmd === 0x90 && velocity > 0) {
-        _activeInstance._handleNoteOn(transposed, velocity);
+        _activeInstance._handleNoteOn(note, velocity);
     } else if (cmd === 0x80 || (cmd === 0x90 && velocity === 0)) {
-        _activeInstance._handleNoteOff(transposed);
+        _activeInstance._handleNoteOff(note);
     } else if (cmd === 0xB0 && note === 64) {
         _activeInstance._handleSustain(velocity >= 64);
     }
@@ -554,7 +560,19 @@ function _approachAlpha(midi, notes, chords, t) {
 
 function _ssActive() {
     const ss = window.slopsmithSplitscreen;
-    return !!(ss && typeof ss.isActive === 'function' && ss.isActive());
+    if (!ss || typeof ss.isActive !== 'function' || !ss.isActive()) return false;
+    // Validate the FULL surface this plugin consumes, not just
+    // isActive(). If a future splitscreen build ships partial
+    // helpers (or an older bundled splitscreen lacks one of the
+    // newer methods), report "not active" so the wrappers fall
+    // back to the main-player single-instance fast path rather
+    // than reaching a half-broken splitscreen state where focus
+    // never lands on any instance and MIDI routing dies.
+    return typeof ss.isCanvasFocused === 'function'
+        && typeof ss.panelChromeFor === 'function'
+        && typeof ss.settingsAnchorFor === 'function'
+        && typeof ss.onFocusChange === 'function'
+        && typeof ss.offFocusChange === 'function';
 }
 
 function _ssPanelChrome(highwayCanvas) {
@@ -610,9 +628,19 @@ function createFactory() {
     // MIDI held / sustain state — per-instance so each panel's
     // keyboard only shows the keys ITS user is holding, not
     // keys held on another focused panel.
+    //
+    // _heldNotes / _sustainedNotes are keyed by the TRANSPOSED
+    // (played) midi value because that's what the keyboard draws
+    // and the synth plays. _rawToPlayed is the cross-reference
+    // so note-off can release the EXACT same key its matching
+    // note-on opened, even if _cfg.transpose changed in between.
+    // Without it, a transpose change while a note is held would
+    // strand the synth envelope + the visual "held" state until
+    // focus / device / destroy released them.
     const _heldNotes = new Map();
     let _sustainOn = false;
     const _sustainedNotes = new Set();
+    const _rawToPlayed = new Map();
 
     // Scoring
     let _hits = 0, _misses = 0, _streak = 0, _bestStreak = 0;
@@ -677,27 +705,45 @@ function createFactory() {
         for (const midi of _heldNotes.keys()) _synthNoteOff(midi);
         _heldNotes.clear();
         _sustainedNotes.clear();
+        _rawToPlayed.clear();
         _sustainOn = false;
     }
 
     // ── MIDI event handlers (called by _midiOnMessage via _activeInstance) ──
+    //
+    // These receive the RAW midi note from the device. Transpose is
+    // applied here and the resulting `played` value is stored under
+    // the raw note so note-off can find it even if _cfg.transpose
+    // shifted between the matching note-on and note-off.
 
-    function _handleNoteOn(midi, velocity) {
-        if (midi < 0 || midi > 127) return;
-        _heldNotes.set(midi, velocity);
-        _synthNoteOn(midi, velocity);
+    function _handleNoteOn(rawMidi, velocity) {
+        if (rawMidi < 0 || rawMidi > 127) return;
+        const played = rawMidi + _cfg.transpose;
+        if (played < 0 || played > 127) return;
+        _rawToPlayed.set(rawMidi, played);
+        _heldNotes.set(played, velocity);
+        _synthNoteOn(played, velocity);
         _synthEnsureCtx();
-        if (_cfg.hitDetection) _checkHit(midi);
+        if (_cfg.hitDetection) _checkHit(played);
     }
 
-    function _handleNoteOff(midi) {
-        if (midi < 0 || midi > 127) return;
+    function _handleNoteOff(rawMidi) {
+        if (rawMidi < 0 || rawMidi > 127) return;
+        const played = _rawToPlayed.get(rawMidi);
+        // Stray note-off (no matching note-on, or already released).
+        // Common after a focus / device switch that cleared held
+        // state, or a transpose change that's been followed by a
+        // note-on at the same raw midi (the most recent note-on
+        // overwrites the entry, which is correct: only the latest
+        // played value is the "real" held key).
+        if (played == null) return;
+        _rawToPlayed.delete(rawMidi);
         if (_sustainOn) {
-            _sustainedNotes.add(midi);
+            _sustainedNotes.add(played);
             return;
         }
-        _heldNotes.delete(midi);
-        _synthNoteOff(midi);
+        _heldNotes.delete(played);
+        _synthNoteOff(played);
     }
 
     function _handleSustain(down) {
