@@ -644,7 +644,22 @@ function createFactory() {
     const _onFocusChange = () => _updateFocusState();
 
     // ── Focus management ──
+    //
+    // _instanceDestroyed is a belt-and-suspenders gate: even if the
+    // splitscreen helper ever ships without an unsubscribe (or a
+    // future version renames offFocusChange), the focus-change
+    // handler will no-op against a destroyed instance rather than
+    // mutating torn-down state. Defensive because the helper's
+    // unsubscribe pathway is the only thing standing between a
+    // lingering listener and a stale closure.
+    let _instanceDestroyed = false;
+
     function _updateFocusState() {
+        if (_instanceDestroyed) return;
+        // _highwayCanvas is nulled by _teardown; a focus-change
+        // callback fired between destroy() and the handler
+        // detaching would otherwise call isCanvasFocused(null).
+        if (!_highwayCanvas) return;
         const shouldFocus = _ssIsCanvasFocused(_highwayCanvas);
         if (shouldFocus && !_isFocused) {
             _isFocused = true;
@@ -1526,6 +1541,13 @@ function createFactory() {
                 if (_activeInstance === instance) _activeInstance = null;
             }
 
+            // Clear the destroyed sentinel so an init() following a
+            // destroy() on the same factory object (e.g. highway
+            // re-using a renderer across songs) re-enables focus
+            // updates. Set to true in destroy() above — without this
+            // reset, _updateFocusState would permanently no-op.
+            _instanceDestroyed = false;
+
             _highwayCanvas = canvas;
             _prevHighwayDisplay = canvas ? canvas.style.display : '';
 
@@ -1597,6 +1619,11 @@ function createFactory() {
         },
         destroy() {
             _isReady = false;
+            // Set BEFORE attempting the (best-effort) unsubscribe so
+            // the focus-change handler's _instanceDestroyed guard
+            // catches any event that sneaks through a failed /
+            // missing offFocusChange call.
+            _instanceDestroyed = true;
             window.removeEventListener('resize', _onWinResize);
             const ss = window.slopsmithSplitscreen;
             if (ss && typeof ss.offFocusChange === 'function') {
