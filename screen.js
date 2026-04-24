@@ -532,6 +532,19 @@ function _checkHit(playedMidi) {
     const notes = _latestNotes;
     const chords = _latestChords;
 
+    // No chart cached yet (song-change reconnect window, or the
+    // very first frame after init before draw has caught up). Skip
+    // scoring entirely — counting a hit as a miss here would inflate
+    // the miss counter every time the user noodles on the keys
+    // during a song switch, with no matching notes to score against.
+    //
+    // Check both "nullish" AND "empty array" — `![] === false` in
+    // JS, so `if (!notes && !chords)` would miss the reconnect case
+    // where bundle.notes/chords arrive as [] before any song data.
+    const notesEmpty = !notes || notes.length === 0;
+    const chordsEmpty = !chords || chords.length === 0;
+    if (notesEmpty && chordsEmpty) return;
+
     let foundHit = false;
 
     if (notes) {
