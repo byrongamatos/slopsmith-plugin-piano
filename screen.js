@@ -692,9 +692,20 @@ function _updateDisplayRange(notes, chords, t) {
     const raw = _visibleMidiRange(notes, chords, t);
     if (!raw) {
         if (_displayLo !== null) return;
+        // detectRange() already maps an empty/fully-filtered chart
+        // to {lo:48, hi:84} via its `lo > hi` check, but defensively
+        // validate here too: if something ever returns an inverted
+        // range we'd rather show C3–B5 than a zero-width keyboard.
+        // The inner MIDI input path relies on having a visible
+        // keyboard even when the chart has 0 visible notes.
         const full = detectRange(notes, chords);
-        _displayLo = full.lo;
-        _displayHi = full.hi;
+        if (full && full.lo <= full.hi) {
+            _displayLo = full.lo;
+            _displayHi = full.hi;
+        } else {
+            _displayLo = 48;  // C3
+            _displayHi = 83;  // B5
+        }
         return;
     }
 
