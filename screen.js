@@ -349,6 +349,15 @@ async function _midiInit() {
         _midiAccess = await navigator.requestMIDIAccess({ sysex: false });
         _midiAccess.onstatechange = () => _midiUpdateDeviceList();
         _midiAutoConnect();
+        // Populate the settings panel's MIDI <select> even when
+        // _midiAutoConnect bailed early (no devices, or user's
+        // saved "None" opt-out). Without this the dropdown stayed
+        // stuck on the initial "None" option until a device
+        // statechange fired, hiding available devices from anyone
+        // who wanted to re-pick one from the panel. _midiConnect's
+        // own call to _midiUpdateDeviceList only fires on the
+        // happy path that actually connects.
+        _midiUpdateDeviceList();
     } catch (e) {
         console.warn('[Piano] MIDI access denied:', e);
     }
