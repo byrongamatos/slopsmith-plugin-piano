@@ -23,7 +23,12 @@
 // Config
 // ═══════════════════════════════════════════════════════════════════════
 
-const KEYS_PATTERNS = /keys|piano|keyboard|synth/i;
+// Word-boundary match so unrelated arrangement names don't trigger
+// Auto-piano via a substring hit — "Monkeys" must NOT match "keys",
+// "Synthesis" must NOT match "synth", etc. The \b anchors on either
+// side catch standard Rocksmith arrangement labels cleanly: "Lead
+// Keys", "Rhythm Piano", "Keyboard", "Synth Bass", etc.
+const KEYS_PATTERNS = /\b(?:keys|piano|keyboard|synth)\b/i;
 const VISIBLE_SECONDS = 3.0;
 const NOW_LINE_Y_FRAC = 0.82;
 const KEYBOARD_H_FRAC = 0.15;
@@ -382,11 +387,24 @@ function _midiUpdateDeviceList() {
     const inputs = [];
     _midiAccess.inputs.forEach(inp => inputs.push(inp));
 
-    sel.innerHTML = '<option value="">None</option>' +
-        inputs.map(inp => {
-            const selected = _midiInput && _midiInput.id === inp.id ? 'selected' : '';
-            return `<option value="${inp.id}" ${selected}>${inp.name}</option>`;
-        }).join('');
+    // Build <option> elements via the DOM API rather than concatenating
+    // an HTML string. MIDI device names come from the attached
+    // hardware and can contain characters that would otherwise inject
+    // markup (a maliciously-named device, or even an accidental "<"
+    // in the vendor string) directly into the settings panel. Setting
+    // .value and .textContent escapes both fields safely.
+    sel.textContent = '';
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = 'None';
+    sel.appendChild(noneOpt);
+    for (const inp of inputs) {
+        const opt = document.createElement('option');
+        opt.value = inp.id;
+        opt.textContent = inp.name;
+        if (_midiInput && _midiInput.id === inp.id) opt.selected = true;
+        sel.appendChild(opt);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
