@@ -55,14 +55,25 @@ const STORE_KEYS = {
     hitDetection:  'piano_hit_detect',
 };
 
+// Safe getter for module-evaluation-time reads. localStorage access
+// can throw SecurityError in sandboxed iframes, on file:// with
+// Safari's stricter policies, or when the browser has disabled
+// storage for the origin. Without a try/catch wrapper an exception
+// here aborts the IIFE outright and the plugin never registers its
+// setRenderer factory. Return null on failure so the `|| default`
+// coalescing below still produces a usable value.
+function _readStore(key) {
+    try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+
 const _cfg = {
-    midiInputId:   localStorage.getItem(STORE_KEYS.midiInputId) || '',
-    instrumentIdx: parseInt(localStorage.getItem(STORE_KEYS.instrumentIdx) || '0'),
-    synthVolume:   parseFloat(localStorage.getItem(STORE_KEYS.synthVolume) || '0.7'),
-    midiChannel:   parseInt(localStorage.getItem(STORE_KEYS.midiChannel) || '-1'),
-    transpose:     parseInt(localStorage.getItem(STORE_KEYS.transpose) || '0'),
-    showNoteNames: localStorage.getItem(STORE_KEYS.showNoteNames) !== 'false',
-    hitDetection:  localStorage.getItem(STORE_KEYS.hitDetection) === 'true',
+    midiInputId:   _readStore(STORE_KEYS.midiInputId) || '',
+    instrumentIdx: parseInt(_readStore(STORE_KEYS.instrumentIdx) || '0'),
+    synthVolume:   parseFloat(_readStore(STORE_KEYS.synthVolume) || '0.7'),
+    midiChannel:   parseInt(_readStore(STORE_KEYS.midiChannel) || '-1'),
+    transpose:     parseInt(_readStore(STORE_KEYS.transpose) || '0'),
+    showNoteNames: _readStore(STORE_KEYS.showNoteNames) !== 'false',
+    hitDetection:  _readStore(STORE_KEYS.hitDetection) === 'true',
 };
 
 function _saveCfg(key, val) {
@@ -110,6 +121,16 @@ let _settingsGear = null;
 let _settingsVisible = false;
 let _highwayCanvas = null;          // the canvas handed to init(); must restore on destroy
 let _prevHighwayDisplay = '';
+// #player-controls inline style snapshot. _createOverlayCanvas nudges
+// position + zIndex so controls stay above the overlay; destroy()
+// needs to restore them verbatim so other visualizations (and the
+// default 2D highway) don't inherit the leaked inline styles.
+// _controlsStyleTouched tracks whether we actually applied the
+// changes, so a no-op teardown (init aborted before we modified
+// them) doesn't clobber an untouched controls element.
+let _controlsStyleTouched = false;
+let _prevControlsPosition = '';
+let _prevControlsZIndex = '';
 
 let _displayLo = null;
 let _displayHi = null;
@@ -301,6 +322,17 @@ function _synthReleaseAll() {
     _noteEnvelopes.clear();
 }
 
+// Shared cleanup for "everything that was sounding on the previous
+// MIDI device should stop now." Called from _teardown() on destroy
+// AND from _midiConnect() on device switch / opt-out, so a "None"
+// pick doesn't leave a chord droning on the way out.
+function _releaseAllSounding() {
+    _synthReleaseAll();
+    _heldNotes.clear();
+    _sustainedNotes.clear();
+    _sustainOn = false;
+}
+
 function _synthSetVolume(vol) {
     _saveCfg('synthVolume', vol);
     if (_synthGain) _synthGain.gain.value = vol;
@@ -329,12 +361,13 @@ function _midiAutoConnect() {
     if (!inputs.length) return;
 
     // Distinguish "never picked a device" from "explicitly picked
-    // None". localStorage.getItem returns null for the never-set
-    // case and '' for an explicit-None save (via _midiConnect).
-    // Read raw rather than _cfg.midiInputId, which collapses both
-    // to '' via its `|| ''` default in the config initialiser.
-    let raw = null;
-    try { raw = localStorage.getItem(STORE_KEYS.midiInputId); } catch (_) {}
+    // None". _readStore returns null for both the never-set case
+    // AND for a storage-disabled context (SecurityError); we
+    // only want to respect the explicit-None sentinel, which is
+    // the literal empty string '' stored by _midiConnect. Reading
+    // _cfg.midiInputId would collapse all of those to '' via its
+    // `|| ''` default in the config initialiser.
+    const raw = _readStore(STORE_KEYS.midiInputId);
     if (raw === '') return;  // user opted out — respect it
 
     const target = inputs.find(i => i.id === raw) || inputs[0];
@@ -344,6 +377,15 @@ function _midiAutoConnect() {
 function _midiConnect(id) {
     if (_midiInput) _midiInput.onmidimessage = null;
     _midiInput = null;
+
+    // Release anything currently sounding on the OLD device before
+    // we swap. queueWaveTable schedules a ~999s envelope, so the
+    // only way a note stops is an explicit cancel. Without this,
+    // picking "None" (or switching to a second device) mid-play
+    // leaves the currently-pressed notes droning until destroy().
+    // Also clears per-note transient state so sustain + held maps
+    // don't point at an obsolete device's note history.
+    _releaseAllSounding();
 
     // Persist the choice regardless of match. An empty id is the
     // "None" option and must be saved so _midiAutoConnect() on the
@@ -1353,6 +1395,15 @@ function _createOverlayCanvas() {
     const controls = document.getElementById('player-controls');
     if (controls) {
         player.insertBefore(canvas, controls);
+        // Snapshot the prior inline values so destroy() can restore
+        // them. Reading controls.style.X returns '' when the rule
+        // lives in a stylesheet rather than inline, and we want to
+        // preserve that distinction — assigning '' back on restore
+        // removes our inline override without touching the
+        // stylesheet rule.
+        _prevControlsPosition = controls.style.position;
+        _prevControlsZIndex = controls.style.zIndex;
+        _controlsStyleTouched = true;
         // Keep controls above the overlay so the toggle gear stays clickable.
         controls.style.position = 'relative';
         controls.style.zIndex = '20';
@@ -1360,6 +1411,18 @@ function _createOverlayCanvas() {
         player.appendChild(canvas);
     }
     return canvas;
+}
+
+function _restoreControlsStyle() {
+    if (!_controlsStyleTouched) return;
+    const controls = document.getElementById('player-controls');
+    if (controls) {
+        controls.style.position = _prevControlsPosition;
+        controls.style.zIndex = _prevControlsZIndex;
+    }
+    _controlsStyleTouched = false;
+    _prevControlsPosition = '';
+    _prevControlsZIndex = '';
 }
 
 function _applyCanvasDims(canvas) {
@@ -1529,13 +1592,16 @@ function createFactory() {
         }
         _removeSettingsPanel();
         _removeSettingsGear();
+        // Roll back the position/zIndex we forced on #player-controls
+        // in _createOverlayCanvas. Without this the nudged inline
+        // styles leak into whatever renderer comes next — another
+        // plugin might rely on a clean z-stack, or the default 2D
+        // highway might paint behind the controls strip permanently.
+        _restoreControlsStyle();
 
         // Release any sounding notes so the user doesn't get a hung
         // tone when switching viz mid-song.
-        _synthReleaseAll();
-        _heldNotes.clear();
-        _sustainedNotes.clear();
-        _sustainOn = false;
+        _releaseAllSounding();
 
         if (restoreCanvas && _highwayCanvas) {
             _highwayCanvas.style.display = _prevHighwayDisplay;
