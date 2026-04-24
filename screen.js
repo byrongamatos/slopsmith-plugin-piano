@@ -1319,14 +1319,20 @@ function createFactory() {
             // Defensive teardown in case a prior init wasn't paired
             // with destroy (shouldn't happen per the contract, but
             // survive a misbehaving caller). Mirror destroy()'s
-            // cleanup — just dropping _pianoCanvas without removing
-            // the window / slopsmith listeners or pausing MIDI would
-            // leak duplicate subscriptions on every re-init.
+            // cleanup exactly — including restoreCanvas=true. If we
+            // skipped the restore, the prior lifetime's highway
+            // canvas would stay `display:none` going into the fresh
+            // capture below, poisoning `_prevHighwayDisplay` with
+            // "none" so a later destroy() would re-hide the canvas
+            // permanently. Also: just dropping _pianoCanvas without
+            // removing the window / slopsmith listeners or pausing
+            // MIDI would leak duplicate subscriptions on every
+            // re-init.
             if (_pianoCanvas || _isReady) {
                 window.removeEventListener('resize', _onWinResize);
                 if (window.slopsmith) window.slopsmith.off?.('song:ready', _onSongReady);
                 _midiPauseHandler();
-                _teardown(/* restoreCanvas */ false);
+                _teardown(/* restoreCanvas */ true);
                 _isReady = false;
             }
 
