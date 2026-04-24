@@ -299,8 +299,16 @@ function _midiAutoConnect() {
     _midiAccess.inputs.forEach(inp => inputs.push(inp));
     if (!inputs.length) return;
 
-    const saved = _cfg.midiInputId;
-    const target = inputs.find(i => i.id === saved) || inputs[0];
+    // Distinguish "never picked a device" from "explicitly picked
+    // None". localStorage.getItem returns null for the never-set
+    // case and '' for an explicit-None save (via _midiConnect).
+    // Read raw rather than _cfg.midiInputId, which collapses both
+    // to '' via its `|| ''` default in the config initialiser.
+    let raw = null;
+    try { raw = localStorage.getItem('piano_midi_input'); } catch (_) {}
+    if (raw === '') return;  // user opted out — respect it
+
+    const target = inputs.find(i => i.id === raw) || inputs[0];
     _midiConnect(target.id);
 }
 
@@ -308,12 +316,23 @@ function _midiConnect(id) {
     if (_midiInput) _midiInput.onmidimessage = null;
     _midiInput = null;
 
-    if (!_midiAccess) return;
+    // Persist the choice regardless of match. An empty id is the
+    // "None" option and must be saved so _midiAutoConnect() on the
+    // next init respects the opt-out instead of auto-picking
+    // inputs[0] again. A non-empty id that doesn't match any
+    // attached device also gets saved here — harmless, and lets a
+    // re-plugged device reconnect to its saved slot without extra
+    // UI work.
+    _saveCfg('midiInputId', id || '');
+
+    if (!id || !_midiAccess) {
+        _midiUpdateDeviceList();
+        return;
+    }
     _midiAccess.inputs.forEach(inp => {
         if (inp.id === id) {
             _midiInput = inp;
             _midiInput.onmidimessage = _midiOnMessage;
-            _saveCfg('midiInputId', id);
         }
     });
     _midiUpdateDeviceList();
@@ -626,8 +645,19 @@ function _injectSettingsGear() {
     const gear = document.createElement('button');
     gear.id = 'btn-piano-settings';
     gear.className = 'px-2 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-400 transition';
-    gear.innerHTML = '&#9881;';
+    gear.type = 'button';
     gear.title = 'Piano settings (MIDI, sound, scoring)';
+    // Accessible name for screen readers — title alone is announced
+    // inconsistently across readers, and the glyph itself would
+    // otherwise surface as "black gear" or similar ambiguous text.
+    gear.setAttribute('aria-label', 'Piano settings');
+    // Build the glyph in a span marked aria-hidden so the accessible
+    // name above stays the authoritative label and the decorative
+    // symbol isn't announced twice.
+    const glyph = document.createElement('span');
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = '⚙';
+    gear.appendChild(glyph);
     gear.onclick = _toggleSettings;
     controls.insertBefore(gear, closeBtn);
     _settingsGear = gear;
