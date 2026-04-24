@@ -1455,30 +1455,46 @@ function _applyCanvasDims(canvas) {
 // Factory — slopsmith#36 setRenderer contract
 // ═══════════════════════════════════════════════════════════════════════
 
+// Wipes scoring, cached layout, and the piano's display range so the
+// next chart / arrangement doesn't inherit stale state. Critical for
+// Auto-mode Keys-to-Keys transitions (piano renderer stays selected
+// across the arrangement switch). Lives at module scope so the
+// song:ready listener wired in init() is a stable function reference
+// — see _onSongReady / _onWinResize below.
+function _resetForNewChart() {
+    _resetScoring();
+    _cachedLayout = null;
+    _lastLayoutW = 0;
+    _lastRangeLo = -1;
+    _lastRangeHi = -1;
+    _displayLo = null;
+    _displayHi = null;
+    // Pull current arrays so a MIDI note-on arriving before the
+    // next draw() has something recent to score against.
+    _primeLatestSnapshot();
+}
+
+// Module-scope handler functions. Previously these were per-factory
+// closures, which meant a defensive-teardown in a NEW factory
+// instance's init() tried to removeEventListener / off against
+// references that belonged to an OLD factory instance — the refs
+// didn't match, the old listeners stayed wired, and every song:ready
+// fired _resetForNewChart twice, every window resize fired
+// _applyCanvasDims twice, etc. Module-scope refs keep attach and
+// detach symmetric regardless of which factory instance is active.
+// (The single-instance module-state assumption at the top of this
+// file already covers multi-factory correctness — Wave C splitscreen
+// adoption will re-factor state into closures and at that point
+// we'll need per-panel handlers too.)
+function _onWinResize() {
+    _applyCanvasDims(_pianoCanvas);
+}
+function _onSongReady() {
+    _resetForNewChart();
+}
+
 function createFactory() {
     let _isReady = false;
-    // Per-instance listeners so destroy() can remove the exact
-    // function references (anonymous arrows aren't removable).
-    const _onWinResize = () => _applyCanvasDims(_pianoCanvas);
-    const _onSongReady = () => _resetForNewChart();
-
-    // Called from the song:ready listener wired below and from init()
-    // itself. Wipes scoring, cached layout, and the piano's display
-    // range so the next chart/arrangement doesn't inherit stale state.
-    // Critical for Auto-mode Keys-to-Keys transitions (piano renderer
-    // stays selected across the arrangement switch).
-    function _resetForNewChart() {
-        _resetScoring();
-        _cachedLayout = null;
-        _lastLayoutW = 0;
-        _lastRangeLo = -1;
-        _lastRangeHi = -1;
-        _displayLo = null;
-        _displayHi = null;
-        // Pull current arrays so a MIDI note-on arriving before the
-        // next draw() has something recent to score against.
-        _primeLatestSnapshot();
-    }
 
     return {
         init(canvas /* , bundle */) {
