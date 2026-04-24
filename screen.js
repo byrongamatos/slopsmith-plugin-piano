@@ -1114,15 +1114,18 @@ function createFactory() {
         const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
         const ctx = _pianoCtx;
 
-        const notesEmpty = !notes || notes.length === 0;
-        const chordsEmpty = !chords || chords.length === 0;
-        if (notesEmpty && chordsEmpty) {
-            ctx.fillStyle = '#040408';
-            ctx.fillRect(0, 0, W, H);
-            return;
-        }
-
-        _updateDisplayRange(notes, chords, t);
+        // Render the keyboard at the cached display range (or
+        // detectRange's C3-B5 fallback) regardless of whether
+        // the chart arrays happen to be empty for this frame.
+        // Long rests and aggressive difficulty filtering can
+        // produce zero in-window notes during normal playback —
+        // the previous "empty arrays = no chart" early-return
+        // collapsed those cases into the same blank-canvas path
+        // we use during loading. The actual loading-state guard
+        // is in draw() above (gated on bundle.isReady), so by
+        // the time we get here the chart is confirmed loaded
+        // even if the per-frame note window is empty.
+        _updateDisplayRange(notes || [], chords || [], t);
         if (_displayLo === null) {
             ctx.fillStyle = '#040408';
             ctx.fillRect(0, 0, W, H);
@@ -1619,6 +1622,24 @@ function createFactory() {
                 _resetForNewChart();
             }
             _lastBundleIsReady = isReady;
+
+            // Loading / reconnect window — chart isn't confirmed
+            // yet. Paint the plugin's base background so the
+            // previous chart's notes + HUD don't sit frozen on
+            // screen, but DON'T render the keyboard either since
+            // we don't know what tuning / range applies. Once
+            // bundle.isReady flips true we hand off to _draw
+            // which renders the keyboard at the discovered range
+            // (or a sane default if the visible window is empty).
+            if (!isReady) {
+                if (_pianoCanvas && _pianoCtx) {
+                    const W = _pianoCanvas.width / (window.devicePixelRatio || 1);
+                    const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
+                    _pianoCtx.fillStyle = '#040408';
+                    _pianoCtx.fillRect(0, 0, W, H);
+                }
+                return;
+            }
 
             _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats);
         },
