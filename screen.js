@@ -961,14 +961,30 @@ function _draw(notes, chords, t, beats) {
     _latestChords = chords;
     _latestTime = t;
 
-    if (!notes && !chords) return;
-
     const W = _pianoCanvas.width / (window.devicePixelRatio || 1);
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
     const ctx = _pianoCtx;
 
+    // No chart yet (song-change reconnect window, or first frame
+    // before song_info arrives). Paint the background rather than
+    // returning early — otherwise the previous chart's notes + HUD
+    // sit frozen on screen through the reconnect, which reads as a
+    // visual stutter / stale frame. An empty canvas at the plugin's
+    // base colour matches what the user expects during "loading".
+    if (!notes && !chords) {
+        ctx.fillStyle = '#040408';
+        ctx.fillRect(0, 0, W, H);
+        return;
+    }
+
     _updateDisplayRange(notes, chords, t);
-    if (_displayLo === null) return;
+    if (_displayLo === null) {
+        // Same rationale as the guard above — clear before bail
+        // so the previous frame doesn't linger.
+        ctx.fillStyle = '#040408';
+        ctx.fillRect(0, 0, W, H);
+        return;
+    }
     const lo = _displayLo;
     const hi = _displayHi;
 
