@@ -796,11 +796,21 @@ function keyForMidi(midi, layout) {
 
 function _draw(notes, chords, t, beats) {
     if (!_pianoCanvas || !_pianoCtx) return;
-    if (!notes && !chords) return;
 
+    // Update the MIDI-scoring snapshots FIRST — before the
+    // no-chart-yet early return below. If a song change arrives
+    // with bundle.currentTime advancing but notes/chords still
+    // empty (WS reconnect window), an async MIDI key-down between
+    // frames would otherwise score against the PREVIOUS song's
+    // cached chart and its old t. Clearing here resets both the
+    // arrays and the time reference so _checkHit sees an empty
+    // chart and scores the stray press as a miss without timing
+    // it against stale data.
     _latestNotes = notes;
     _latestChords = chords;
     _latestTime = t;
+
+    if (!notes && !chords) return;
 
     const W = _pianoCanvas.width / (window.devicePixelRatio || 1);
     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
@@ -1268,9 +1278,13 @@ function _applyCanvasDims(canvas) {
     // that highway.js passes to resize(). Those are backing-store dims
     // scaled by `_renderScale` (HD/Medium/Low), tuned for the 2D or
     // WebGL renderer that OWNS the given canvas. The piano runs on its
-    // OWN overlay canvas sized to the whole #player region minus the
-    // controls strip, so the sensible source of truth is the element
-    // rect — not the highway canvas's backing store.
+    // OWN overlay canvas sized to the FULL #player region (the canvas
+    // style above is width:100%; height:100%; position:absolute, so
+    // it stretches to cover the entire container). The controls strip
+    // stays clickable because #player-controls is layered above the
+    // overlay via z-index — it isn't subtracted from the canvas size.
+    // Source of truth is therefore the player element's rect, not the
+    // highway canvas's backing store.
     if (!canvas) return;
     const player = document.getElementById('player');
     if (!player) return;
@@ -1372,7 +1386,12 @@ function createFactory() {
             _injectSettingsGear();
             _applyCanvasDims(_pianoCanvas);
             window.addEventListener('resize', _onWinResize);
-            if (window.slopsmith) window.slopsmith.on('song:ready', _onSongReady);
+            // Optional-chain .on as well as the receiver: older
+            // slopsmith cores (pre-Wave A) expose window.slopsmith as
+            // a plain object without the on/off bus, and a bare
+            // .on(...) call there would throw. With the optional
+            // chain this degrades to a no-op on those cores.
+            window.slopsmith?.on?.('song:ready', _onSongReady);
 
             _resetForNewChart();
 
