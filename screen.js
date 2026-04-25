@@ -887,8 +887,14 @@ function createFactory() {
                 _displayLo = full.lo;
                 _displayHi = full.hi;
             } else {
+                // 48 = C3, 95 = B6 — matches detectRange's
+                // empty-chart fallback after octave-boundary
+                // rounding + the 47-semitone-minimum-span while
+                // loop. Keeping these in lockstep means the two
+                // fallback paths produce the same visible
+                // keyboard span.
                 _displayLo = 48;
-                _displayHi = 83;
+                _displayHi = 95;
             }
             return;
         }
@@ -1167,7 +1173,7 @@ function createFactory() {
         const ctx = _pianoCtx;
 
         // Render the keyboard at the cached display range (or
-        // detectRange's C3-B5 fallback) regardless of whether
+        // detectRange's C3-B6 fallback) regardless of whether
         // the chart arrays happen to be empty for this frame.
         // Long rests and aggressive difficulty filtering can
         // produce zero in-window notes during normal playback —
